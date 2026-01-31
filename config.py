@@ -44,7 +44,14 @@ COORDINATOR_CONFIG = ModelConfig(
     provider="novita"
 )
 
-# 6. CITATION: Adds inline citations
+# 6. REFLECTION: Reviews progress and generates new subtasks
+# Recommended: Reasoning models 
+REFLECTION_CONFIG = ModelConfig(
+    model_id="moonshotai/Kimi-K2-Thinking",
+    provider= "together"
+)
+
+# 7. CITATION: Adds inline citations
 # Recommended: Strong instruction following
 CITATION_CONFIG = ModelConfig(
     model_id="Qwen/Qwen3-235B-A22B-Instruct-2507",

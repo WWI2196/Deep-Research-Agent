@@ -21,6 +21,7 @@ from config import (
     SCALING_CONFIG,
     SUBAGENT_CONFIG,
     COORDINATOR_CONFIG,
+    REFLECTION_CONFIG,
     CITATION_CONFIG,
 )
 
@@ -107,6 +108,45 @@ Return JSON with:
 }
 """
 
+REFLECTION_INSTRUCTIONS = """
+You are a research coordinator.
+Your job is to review the current research progress and determine if more information is needed.
+
+Context:
+- User Query: {user_query}
+- Research Plan: {research_plan}
+- Past Subtasks: {past_subtasks}
+- Subagent Reports:
+{subagent_reports}
+
+Analyze the reports. Identify any:
+1. Missing information required by the original plan.
+2. Knowledge gaps where the agents failed to find sufficient data.
+3. Contradictions between reports that need resolution.
+
+If the research is sufficient to answer the User Query comprehensively with high density information, return an empty list of subtasks.
+
+If more research is needed, generate a list of NEW subtasks to address these specific gaps.
+Do NOT regenerate subtasks that have already been completed.
+Keep the new subtasks focused and specific.
+
+Output valid JSON matching this schema:
+{
+  "subtasks": [
+    {
+      "id": "new_id_1",
+      "title": "Title",
+      "description": "Detailed instructions...",
+      "objective": "Objective...",
+      "output_format": "markdown",
+      "tool_guidance": "search strategies...",
+      "source_types": "preferred sources...",
+      "boundaries": "what to exclude..."
+    }
+  ]
+}
+"""
+
 SUBAGENT_REPORT_PROMPT = """
 You are a specialized research sub-agent.
 
@@ -127,33 +167,29 @@ Boundaries (do NOT include): {subtask_boundaries}
 <<<END SUBTASK>>>
 
 IMPORTANT INSTRUCTIONS:
-1. Start with BROAD search queries, then narrow down based on results
-2. Prefer PRIMARY sources (official docs, academic papers, original research)
-   over SEO-optimized content farms or secondary sources
-3. After each search, evaluate: Did I find what I need? Are there gaps?
-4. Adapt your search strategy based on what you find
-5. Use interleaved thinking: after tool results, reflect on quality and next steps
+1. Focus on "distilled insights" and high information density.
+2. Avoid verbose summaries; prioritize facts, data, and unique findings.
+3. Start with BROAD search queries, then narrow down based on results.
+4. Prefer PRIMARY sources (official docs, academic papers) over SEO content.
+5. If you find conflicting information, note it explicitly.
 
 You will be given extracted evidence snippets and sources.
 Produce a MARKDOWN report with this structure:
 
 # [{subtask_id}] {subtask_title}
 
-## Summary
-Short overview of the main findings.
+## Key Findings (Distilled)
+- High-density bullet points with clear facts/numbers.
 
 ## Detailed Analysis
-Well-structured explanation with subsections as needed.
+- In-depth exploration of the subtask topic.
+- Connection of evidence to the objective.
 
-## Key Points
-- Bullet point
-- Bullet point
-
-## Source Quality Assessment
-Note which sources are primary vs secondary, and their reliability.
+## Source Quality
+- Assessment of source reliability.
 
 ## Sources
-- [Title](url) - source type and relevance comment
+- [Title](url) - source type and relevance
 """
 
 SYNTHESIS_PROMPT = """
@@ -241,6 +277,7 @@ class ResearchState(TypedDict, total=False):
     errors: List[str]
     # New fields for iterative research
     iteration_count: int
+    completed_subtasks: List[str]
     max_iterations: int
     research_complete: bool
     memory: Dict[str, Any]  # External memory for context preservation
@@ -798,7 +835,17 @@ def build_graph() -> StateGraph:
     @traceable(name="subagents_node")
     def subagents_node(state: ResearchState) -> ResearchState:
         iteration = state.get("iteration_count", 0)
-        _log_event(state, f"Running subagents (iteration {iteration + 1})", "subagents")
+        completed = set(state.get("completed_subtasks", []))
+        
+        # Filter subtasks that haven't been completed yet
+        all_subtasks = state.get("subtasks", [])
+        subtasks_to_run = [s for s in all_subtasks if s["id"] not in completed]
+        
+        if not subtasks_to_run:
+            _log_event(state, "No new subtasks to run.", "subagents")
+            return state
+
+        _log_event(state, f"Running {len(subtasks_to_run)} subagents (iteration {iteration + 1})", "subagents")
         
         # Store research plan in memory to prevent loss
         state["memory"]["research_plan"] = state["research_plan"]
@@ -809,7 +856,7 @@ def build_graph() -> StateGraph:
             run_subagents_parallel(
                 state["user_query"],
                 state["research_plan"],
-                state["subtasks"],
+                subtasks_to_run,
                 tool_budget,
             )
         )
@@ -820,6 +867,10 @@ def build_graph() -> StateGraph:
         
         state["subagent_reports"] = existing_reports + results["reports"]
         
+        # Update completed subtasks
+        new_completed = [item["subtask_id"] for item in results.get("raw", [])]
+        state["completed_subtasks"] = list(completed.union(new_completed))
+
         # Merge and deduplicate sources
         all_sources = existing_sources + results["sources"]
         seen_urls = set()
@@ -842,8 +893,6 @@ def build_graph() -> StateGraph:
                 },
             )
         
-        # Evaluate quality and determine if more research is needed
-        state["current_quality_score"] = _evaluate_research_quality(state)
         state["iteration_count"] = iteration + 1
         
         persist_state(state, f"subagents_iter_{iteration}")
@@ -879,43 +928,86 @@ def build_graph() -> StateGraph:
         persist_state(state, "citation")
         return state
 
-    @traceable(name="evaluate_node")
-    def evaluate_node(state: ResearchState) -> ResearchState:
-        """Evaluate research quality and decide if more research is needed."""
-        quality = state.get("current_quality_score", 0.0)
-        threshold = state.get("quality_threshold", 0.7)
+    @traceable(name="reflection_node")
+    def reflection_node(state: ResearchState) -> ResearchState:
+        """Reflect on research depth and identify gaps."""
+        current_subtasks = state.get("subtasks", [])
+        reports = state.get("subagent_reports", [])
         iteration = state.get("iteration_count", 0)
         max_iter = state.get("max_iterations", 2)
         
-        if quality >= threshold or iteration >= max_iter:
-            state["research_complete"] = True
-            _log_event(
-                state,
-                f"Research complete (quality: {quality:.2f}, iterations: {iteration})",
-                "evaluation"
-            )
-        else:
-            _log_event(
-                state,
-                f"Research needs more depth (quality: {quality:.2f}, threshold: {threshold})",
-                "evaluation"
-            )
+        # Format past subtasks (ID/Title) for context
+        past_subtasks = ", ".join([f"{s.get('id')}: {s.get('title')}" for s in current_subtasks])
         
-        persist_state(state, "evaluation")
+        if iteration >= max_iter:
+             state["research_complete"] = True
+             _log_event(state, "Max iterations reached. Proceeding to synthesis.", "reflection")
+             return state
+
+        _log_event(state, "Reflecting on research progress...", "reflection")
+        
+        response = _hf_chat(
+            model_id=REFLECTION_CONFIG.model_id,
+            messages=[
+                {
+                    "role": "user", 
+                    "content": REFLECTION_INSTRUCTIONS.format(
+                        user_query=state["user_query"],
+                        research_plan=state["research_plan"],
+                        past_subtasks=past_subtasks,
+                        subagent_reports="\n\n".join(reports)
+                    )
+                }
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "subtaskList",
+                    "schema": SubtaskList.model_json_schema(),
+                    "strict": True,
+                },
+            },
+            provider=REFLECTION_CONFIG.provider,
+        )
+        
+        # Parse response
+        content = response.strip()
+        new_subtasks = []
+        try:
+             payload = json.loads(content)
+             new_subtasks = payload.get("subtasks", [])
+        except json.JSONDecodeError:
+            extracted = _extract_json(content)
+            if extracted:
+                 try:
+                    payload = json.loads(extracted)
+                    new_subtasks = payload.get("subtasks", [])
+                 except:
+                    pass
+        
+        if new_subtasks:
+            _log_event(state, f"Reflection identified {len(new_subtasks)} new subtasks: {[s['title'] for s in new_subtasks]}", "reflection")
+            state["subtasks"].extend(new_subtasks)
+            state["research_complete"] = False
+        else:
+            _log_event(state, "Reflection identified no new gaps. Research complete.", "reflection")
+            state["research_complete"] = True
+            
+        persist_state(state, "reflection")
         return state
     
     def should_continue_research(state: ResearchState) -> str:
         """Conditional edge: continue research or move to synthesis."""
         if state.get("research_complete", False):
             return "synthesize"
-        return "scale"  # Go back to create more subtasks if needed
+        return "subagents"
 
     graph.add_node("init", init_state)
     graph.add_node("plan", plan_node)
     graph.add_node("split", split_node)
     graph.add_node("scale", scale_node)
     graph.add_node("subagents", subagents_node)
-    graph.add_node("evaluate", evaluate_node)
+    graph.add_node("reflection", reflection_node)
     graph.add_node("synthesize", synthesize_node)
     graph.add_node("cite", citation_node)
 
@@ -924,15 +1016,15 @@ def build_graph() -> StateGraph:
     graph.add_edge("plan", "split")
     graph.add_edge("split", "scale")
     graph.add_edge("scale", "subagents")
-    graph.add_edge("subagents", "evaluate")
+    graph.add_edge("subagents", "reflection")
     
     # Conditional edge: either continue research or synthesize
     graph.add_conditional_edges(
-        "evaluate",
+        "reflection",
         should_continue_research,
         {
             "synthesize": "synthesize",
-            "scale": "scale",  # Loop back for more research
+            "subagents": "subagents",
         }
     )
     
