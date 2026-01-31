@@ -1,0 +1,7 @@
+python-dotenv
+huggingface_hub
+pydantic
+langgraph
+langsmith
+supabase
+firecrawl-py
