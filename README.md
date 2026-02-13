@@ -47,56 +47,36 @@ Final synthesized report
 
 ```mermaid
 flowchart TD
-    U[User submits query to POST /api/research/stream] --> S[research_stream_generator starts SSE]
-    S --> G[build_graph and compile LangGraph StateGraph]
-    G --> I[init node]
-    I --> P[plan node]
-    P --> SP[split node]
-    SP --> SC[scale node]
-    SC --> SR[subagents node]
+    U[User asks a research question] --> P[1. Plan generation]
+    P --> T[2. Task generation split into subtasks]
+    T --> D[3. Parallel delegation one subagent per pending task]
 
-    SR --> F1[Select pending subtasks: id not in completed_subtasks]
-    F1 --> F2[Emit subagents-launch with agent_details]
-    F2 --> F3[Run one run_subagent per pending subtask via asyncio.to_thread]
-
-    F3 --> A1[Per subagent: generate queries]
-    A1 --> A2[Parallel web search per query]
-    A2 --> FC{Firecrawl available?}
-    FC -- yes --> FCS[Firecrawl search + normalize Pydantic response]
-    FC -- unavailable/error --> DDG[DuckDuckGo free fallback]
-    FCS --> A3[Score sources via evaluator LLM]
-    DDG --> A3
-    A3 --> A4{avg score < 0.5 and high quality < 3?}
-    A4 -- yes --> A5[Generate refined queries and re-search]
-    A5 --> A3
-    A4 -- no --> A6[Enforce max 3 sources per domain and dedupe URLs]
-    A6 --> A7[Extract top URLs via Firecrawl or use snippets if unavailable]
-    A7 --> A8[Build evidence, fallback to snippets if extract empty]
-    A8 --> A9[Write subagent report]
-    A9 --> A10[Emit subagent-complete and return report/sources]
-
-    A10 --> M1[Merge reports and deduped sources into state]
-    M1 --> R[reflection node]
-
-    R --> R0{iteration_count >= max_iterations?}
-    R0 -- yes --> C1[Set research_complete true]
-    R0 -- no --> R1[Reflection LLM audits reports and returns JSON subtasks]
-    R1 --> R2{new subtasks returned?}
-    R2 -- yes --> R3[Append gap subtasks and set research_complete false]
-    R3 --> SR
-    R2 -- no --> C1
-
-    C1 --> SY[synthesize node]
-    SY --> CI[cite node]
-    CI --> O1[Emit final-result cited_report or report]
-    O1 --> O2[Emit complete event with totals]
-
-    subgraph Progress and UI updates
-      E1[Backend emits phase and subagent events]
-      E2[server translates event bus to SSE payloads]
-      E3[Frontend renders phase timeline, agent lanes, live activity, source panels]
-      E1 --> E2 --> E3
+    subgraph Subagent work in parallel
+      D --> Q[Generate search queries]
+      Q --> W[Search web Firecrawl primary DuckDuckGo fallback]
+      W --> E[Evaluate source quality and refine weak queries]
+      E --> X[Extract evidence and write sub-report]
     end
+
+    X --> M[4. Merge reports and deduplicated sources]
+    M --> G[5. Gap analysis reflection checks missing coverage]
+    G --> N{New gaps found and iteration limit not reached?}
+    N -- Yes --> R[Create new gap subtasks and assign agents again]
+    R --> D
+    N -- No --> S[6. Synthesize final report]
+    S --> C[7. Citation evaluation and inline references]
+    C --> O[8. Stream final cited report to user]
+
+    subgraph Live visibility
+      V1[Backend emits phase and agent events]
+      V2[SSE stream delivers updates]
+      V3[UI shows progress agents and sources in real time]
+      V1 --> V2 --> V3
+    end
+
+    D -. status updates .-> V1
+    G -. reflection updates .-> V1
+    C -. citation updates .-> V1
 ```
 
 ### Deep Research in 10 quick steps
