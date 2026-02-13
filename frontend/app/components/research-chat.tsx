@@ -250,15 +250,15 @@ export function ResearchChat({
       try {
         let data: any = null;
         try {
-          const proxied = await fetch("/api/config");
-          if (proxied.ok) data = await proxied.json();
+          const direct = await fetch(`${BACKEND_URL}/api/config`);
+          if (direct.ok) data = await direct.json();
         } catch {
           /* continue */
         }
 
         if (!data) {
-          const direct = await fetch(`${BACKEND_URL}/api/config`);
-          if (direct.ok) data = await direct.json();
+          const proxied = await fetch("/api/config");
+          if (proxied.ok) data = await proxied.json();
         }
 
         if (data?.available_models) setAvailableModels(data.available_models);
@@ -438,7 +438,7 @@ export function ResearchChat({
       {/* Messages area */}
       <div
         ref={scrollRef}
-        className="space-y-6 mb-6 max-h-[calc(100vh-260px)] overflow-y-auto scrollbar-hide"
+        className="space-y-6 mb-6"
       >
         {/* Suggestion cards when empty */}
         {messages.length === 0 && (

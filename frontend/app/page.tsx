@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ResearchChat } from "./components/research-chat";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 export default function Home() {
   const [providerInfo, setProviderInfo] = useState<{ provider: string; model: string } | null>(null);
-  const [isOnline, setIsOnline] = useState<boolean>(false);
+  const [connectionStatus, setConnectionStatus] = useState<"checking" | "online" | "offline">("checking");
+  const consecutiveFailuresRef = useRef(0);
 
   const handleModelChange = useCallback((provider: string, model: string) => {
     setProviderInfo((prev) => {
@@ -19,49 +20,95 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const checkStatus = async () => {
+    const fetchWithTimeout = async (url: string, timeoutMs = 3000) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+
+    const checkStatus = async (): Promise<boolean> => {
       try {
         let cfg: any = null;
         let healthOk = false;
 
+        // Check health directly first (independent of /config success).
         try {
-          const [cfgRes, healthRes] = await Promise.all([
-            fetch("/api/config"),
-            fetch("/api/health"),
-          ]);
-          if (cfgRes.ok) cfg = await cfgRes.json();
-          healthOk = healthRes.ok;
+          const healthResDirect = await fetchWithTimeout(`${BACKEND_URL}/api/health`);
+          healthOk = healthResDirect.ok;
         } catch {
           /* fallback below */
         }
 
-        if (!cfg || !healthOk) {
+        if (!healthOk) {
           try {
-            const [cfgResDirect, healthResDirect] = await Promise.all([
-              fetch(`${BACKEND_URL}/api/config`),
-              fetch(`${BACKEND_URL}/api/health`),
-            ]);
-            if (cfgResDirect.ok) cfg = await cfgResDirect.json();
-            healthOk = healthResDirect.ok;
+            const healthRes = await fetchWithTimeout("/api/health");
+            healthOk = healthRes.ok;
           } catch {
             /* offline fallback */
+          }
+        }
+
+        // Load config independently; do not block online detection on config.
+        try {
+          const cfgResDirect = await fetchWithTimeout(`${BACKEND_URL}/api/config`);
+          if (cfgResDirect.ok) cfg = await cfgResDirect.json();
+        } catch {
+          /* fallback below */
+        }
+        if (!cfg) {
+          try {
+            const cfgRes = await fetchWithTimeout("/api/config");
+            if (cfgRes.ok) cfg = await cfgRes.json();
+          } catch {
+            /* ignore config errors */
           }
         }
 
         if (cfg) {
           setProviderInfo({ provider: cfg.default_provider || "", model: cfg.default_model || "" });
         }
-        setIsOnline(healthOk);
+
+        if (healthOk) {
+          consecutiveFailuresRef.current = 0;
+          setConnectionStatus("online");
+          return true;
+        } else {
+          consecutiveFailuresRef.current += 1;
+          if (consecutiveFailuresRef.current >= 2) {
+            setConnectionStatus("offline");
+          } else {
+            setConnectionStatus("checking");
+          }
+          return false;
+        }
       } catch {
-        setIsOnline(false);
+        consecutiveFailuresRef.current += 1;
+        if (consecutiveFailuresRef.current >= 2) {
+          setConnectionStatus("offline");
+        }
+        return false;
       }
     };
 
-    void checkStatus();
-    const interval = setInterval(() => {
-      void checkStatus();
-    }, 15000);
-    return () => clearInterval(interval);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const loop = async () => {
+      if (cancelled) return;
+      const online = await checkStatus();
+      const nextDelay = online ? 15000 : 2000;
+      timer = setTimeout(loop, nextDelay);
+    };
+
+    void loop();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   return (
@@ -82,8 +129,20 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full glass text-[10px] sm:text-[11px] text-white/50">
-              <div className={`w-1.5 h-1.5 rounded-full ${isOnline ? "bg-emerald-400 animate-pulse" : "bg-red-400"}`} />
-              <span>{isOnline ? "Online" : "Offline"}</span>
+              <div className={`w-1.5 h-1.5 rounded-full ${
+                connectionStatus === "online"
+                  ? "bg-emerald-400 animate-pulse"
+                  : connectionStatus === "offline"
+                    ? "bg-red-400"
+                    : "bg-amber-400 animate-pulse"
+              }`} />
+              <span>
+                {connectionStatus === "online"
+                  ? "Online"
+                  : connectionStatus === "offline"
+                    ? "Offline"
+                    : "Checking"}
+              </span>
             </div>
             <div className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full glass text-[10px] sm:text-[11px] text-white/50 max-w-[220px] sm:max-w-none">
               <span className="text-white/30">Model:</span>

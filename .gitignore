@@ -9,3 +9,8 @@ build/
 *.log
 *.tmp
 *.cache
+__pycache__/
+
+.DS_Store
+.vscode/
+.env.local

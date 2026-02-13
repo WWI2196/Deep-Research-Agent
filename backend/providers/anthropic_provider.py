@@ -39,6 +39,7 @@ class AnthropicProvider(LLMProvider):
         model: str,
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> str:
         # Separate system messages from conversation messages
@@ -62,7 +63,7 @@ class AnthropicProvider(LLMProvider):
             "model": model,
             "messages": conversation,
             "temperature": temperature,
-            "max_tokens": 8192,
+            "max_tokens": max_tokens or 8192,
         }
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)

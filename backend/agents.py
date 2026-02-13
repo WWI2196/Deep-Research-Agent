@@ -126,26 +126,68 @@ def _strip_subtask_tags(text: str) -> str:
     return text
 
 
-def _continue_if_truncated(report: str, user_query: str, context: str) -> str:
-    """Detect if a report was cut off mid-sentence and continue generation."""
-    if not report or len(report) < 500:
+def _continue_if_truncated(
+    report: str,
+    user_query: str,
+    context: str,
+    *,
+    end_marker: Optional[str] = None,
+    max_rounds: int = 4,
+) -> str:
+    """Continue generation when output appears cut off or required end marker is missing."""
+    if not report:
         return report
-    
-    # Check for signs of truncation
-    last_100 = report[-100:].strip()
-    
-    # Hard sign: ends mid-sentence or with an open bracket
-    ends_cleanly = last_100.endswith(('.', '!', '?', ':', '\n', ')', ']', '```', '"', '**'))
-    # Hard sign: ends with a dangling connective
-    dangling_words = ('and', 'the', 'of', 'in', 'to', 'a', 'an', 'or', 'but', 'for', 'with', 'that', 'is', 'are', 'was')
-    last_word = last_100.split()[-1].rstrip('.,;:') if last_100.split() else ''
-    ends_with_dangling = last_word.lower() in dangling_words
 
-    # continue if there's a signal of truncation
-    if not ends_cleanly and ends_with_dangling:
-        logger.info("Report appears truncated (ends with '%s'), requesting continuation...", last_word)
-        emit({"type": "subagent-step", "subtask_id": "synthesis", "subtask_title": "Report Synthesis", "step": "continuing", "message": "Report was truncated, continuing generation..."})
+    def _has_clean_ending(text: str) -> bool:
+        tail = text.rstrip()
+        if not tail:
+            return True
+        if tail.endswith(("```", "***", "---", "___", "**")):
+            return True
+        return tail.endswith((".", "!", "?", ":", ")", "]", '"', "”", "'", "’"))
+
+    def _needs_continuation(text: str) -> bool:
+        if end_marker and end_marker not in text:
+            return True
+
+        if len(text) < 500:
+            return False
+
+        tail = text.rstrip()
+        if _has_clean_ending(tail):
+            return False
+
+        # If it ends with an alphanumeric token and no terminal punctuation,
+        # it's very likely cut by token limits.
+        if tail and tail[-1].isalnum():
+            return True
+
+        # Conservative fallback for dangling connective endings.
+        last_word_match = re.search(r"([A-Za-z]+)\W*$", tail)
+        last_word = last_word_match.group(1).lower() if last_word_match else ""
+        dangling_words = {
+            "and", "the", "of", "in", "to", "a", "an", "or", "but",
+            "for", "with", "that", "is", "are", "was", "were", "as",
+        }
+        return last_word in dangling_words
+
+    round_idx = 0
+    while round_idx < max_rounds and _needs_continuation(report):
+        round_idx += 1
+        logger.info("Report appears truncated (round %s/%s), requesting continuation...", round_idx, max_rounds)
+        emit({
+            "type": "subagent-step",
+            "subtask_id": "synthesis",
+            "subtask_title": "Report Synthesis",
+            "step": "continuing",
+            "message": f"Report was truncated, continuing generation (pass {round_idx}/{max_rounds})...",
+        })
         try:
+            marker_instruction = (
+                f" End with the exact marker {end_marker}."
+                if end_marker
+                else ""
+            )
             continuation = _chat(
                 role="coordinator",
                 messages=[
@@ -153,23 +195,28 @@ def _continue_if_truncated(report: str, user_query: str, context: str) -> str:
                         "role": "system",
                         "content": (
                             "You are continuing a research report that was cut off. "
-                            "Pick up EXACTLY where the text ends. Do not repeat any content. "
-                            "Do not add any preamble. Just continue writing from the cutoff point. "
-                            "Complete all remaining sections, especially Conclusions and Sources. "
+                            "Pick up EXACTLY where the text ends. Do not repeat previous content. "
+                            "Do not add preamble text. Continue seamlessly and finish the remaining sections."
+                            f"{marker_instruction} "
                             f"The report is about: {user_query}"
                         ),
                     },
                     {
                         "role": "user",
-                        "content": f"Continue this report from where it was cut off:\n\n...{report[-2000:]}",
+                        "content": f"Continue this report from where it was cut off:\n\n...{report[-3000:]}",
                     },
                 ],
+                max_tokens=8192,
             )
-            if continuation and len(continuation.strip()) > 50:
-                return report + "\n\n" + continuation.strip()
+            if not continuation or len(continuation.strip()) < 20:
+                break
+            report = report.rstrip() + "\n\n" + continuation.strip()
         except Exception as e:
             logger.warning(f"Continuation failed: {e}")
-    
+            break
+
+    if end_marker:
+        report = report.replace(end_marker, "").rstrip()
     return report
 
 
@@ -179,6 +226,7 @@ def _chat(
     role: str,
     messages: List[Dict[str, str]],
     temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
     max_retries: int = 3,
 ) -> str:
     """Call the LLM configured for *role* with observability & retries."""
@@ -200,6 +248,7 @@ def _chat(
                 model=cfg.model,
                 messages=messages,
                 temperature=temp,
+                max_tokens=max_tokens,
             )
             result = _clean_think_tags(result)
 
@@ -638,11 +687,18 @@ def synthesize_report(user_query: str, research_plan: str, reports: List[str]) -
                         user_query=user_query,
                         research_plan=research_plan[:3000],
                         subagent_reports=truncated,
-                    ),
+                    ) + "\n\nIMPORTANT: End your full final answer with this exact marker on its own line: <<END_OF_REPORT>>",
                 }],
+                max_tokens=8192,
             )
             # Check if report was cut off and continue if needed
-            result = _continue_if_truncated(result, user_query, truncated)
+            result = _continue_if_truncated(
+                result,
+                user_query,
+                truncated,
+                end_marker="<<END_OF_REPORT>>",
+                max_rounds=5,
+            )
             # Strip any remaining bracket tags like [task_id]
             result = _strip_subtask_tags(result)
             return result
@@ -673,9 +729,10 @@ def add_citations(report: str, sources: List[Dict[str, Any]]) -> str:
                 "content": CITATION_SYSTEM.format(report=truncated, sources=sources_text),
             }],
             temperature=0.1,
+            max_tokens=8192,
         )
         # Continue if truncated
-        result = _continue_if_truncated(result, "citation pass", "")
+        result = _continue_if_truncated(result, "citation pass", "", max_rounds=3)
         # Strip any remaining tags
         result = _strip_subtask_tags(result)
         return result

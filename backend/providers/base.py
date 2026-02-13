@@ -20,6 +20,7 @@ class LLMProvider(ABC):
         model: str,
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Send chat messages and return the text response."""

@@ -42,6 +42,7 @@ class HuggingFaceProvider(LLMProvider):
         model: str,
         messages: List[Dict[str, str]],
         temperature: float = 0.2,
+        max_tokens: Optional[int] = None,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> str:
         kwargs: Dict[str, Any] = {
@@ -49,6 +50,8 @@ class HuggingFaceProvider(LLMProvider):
             "messages": messages,
             "temperature": temperature,
         }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         if response_format:
             kwargs["response_format"] = response_format
 
