@@ -970,6 +970,8 @@ function PhaseContent({
   step: { id: string; status: string };
   state: PhaseState;
 }) {
+  const [isPlanMinimized, setIsPlanMinimized] = useState(false);
+
   return (
     <div className="px-4 py-3 bg-white/[0.008] border-b border-white/[0.04] animate-slide-down space-y-3">
       {/* Plan */}
@@ -977,10 +979,33 @@ function PhaseContent({
         <div className="glass rounded-xl p-3">
           <div className="text-[10px] uppercase tracking-wider text-white/25 mb-2 font-semibold flex items-center gap-1.5">
             <span className="text-violet-400/80">Plan</span>
+            <button
+              type="button"
+              onClick={() => setIsPlanMinimized((prev) => !prev)}
+              className="ml-auto inline-flex items-center gap-1 rounded-md border border-white/10 bg-white/[0.03] px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-white/50 hover:text-white/80 hover:bg-white/[0.06] transition-colors"
+              aria-label={isPlanMinimized ? "Expand planning text" : "Minimize planning text"}
+            >
+              {isPlanMinimized ? "Expand" : "Minimize"}
+              <svg
+                className={`w-3 h-3 transition-transform ${isPlanMinimized ? "rotate-180" : ""}`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M19 9l-7 7-7-7"
+                />
+              </svg>
+            </button>
           </div>
-          <div className="prose prose-invert prose-sm max-w-none prose-headings:text-white/85 prose-p:text-white/70 prose-strong:text-white/85 prose-li:text-white/70">
-            <MarkdownRenderer content={state.planPreview} />
-          </div>
+          {!isPlanMinimized && (
+            <div className="prose prose-invert prose-sm max-w-none prose-headings:text-white/85 prose-p:text-white/70 prose-strong:text-white/85 prose-li:text-white/70">
+              <MarkdownRenderer content={state.planPreview} />
+            </div>
+          )}
         </div>
       )}
 
@@ -1552,16 +1577,6 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
     const active = state.steps.find((s) => s.status === "active");
     if (active) setExpandedPhase(active.id);
   }, [state.steps]);
-
-  // Auto-scroll into view
-  useEffect(() => {
-    if (containerRef.current) {
-      containerRef.current.scrollIntoView({
-        behavior: "smooth",
-        block: "nearest",
-      });
-    }
-  }, [events.length]);
 
   const activeSteps = state.steps.filter((s) => s.status !== "pending");
 
