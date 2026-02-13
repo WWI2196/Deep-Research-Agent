@@ -172,6 +172,7 @@ def _continue_if_truncated(
         return last_word in dangling_words
 
     round_idx = 0
+    tail_chars = 3000
     while round_idx < max_rounds and _needs_continuation(report):
         round_idx += 1
         logger.info("Report appears truncated (round %s/%s), requesting continuation...", round_idx, max_rounds)
@@ -203,7 +204,7 @@ def _continue_if_truncated(
                     },
                     {
                         "role": "user",
-                        "content": f"Continue this report from where it was cut off:\n\n...{report[-3000:]}",
+                        "content": f"Continue this report from where it was cut off:\n\n...{report[-tail_chars:]}",
                     },
                 ],
                 max_tokens=8192,
@@ -213,7 +214,37 @@ def _continue_if_truncated(
             report = report.rstrip() + "\n\n" + continuation.strip()
         except Exception as e:
             logger.warning(f"Continuation failed: {e}")
+            lower = str(e).lower()
+            if any(token in lower for token in ["400", "too long", "max", "context"]):
+                tail_chars = max(1000, int(tail_chars * 0.65))
+                continue
             break
+
+    if end_marker and end_marker not in report:
+        try:
+            logger.info("End marker still missing after continuation rounds; requesting compact finalization pass...")
+            final_piece = _chat(
+                role="coordinator",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are finalizing a report that ended early. "
+                            "Continue from the exact end, do not repeat prior text, and finish cleanly. "
+                            f"End with the exact marker {end_marker}."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Continue and finish from this tail:\n\n...{report[-1200:]}",
+                    },
+                ],
+                max_tokens=4096,
+            )
+            if final_piece and len(final_piece.strip()) >= 20:
+                report = report.rstrip() + "\n\n" + final_piece.strip()
+        except Exception as e:
+            logger.warning(f"Final compact continuation failed: {e}")
 
     if end_marker:
         report = report.replace(end_marker, "").rstrip()
@@ -715,27 +746,63 @@ def synthesize_report(user_query: str, research_plan: str, reports: List[str]) -
 def add_citations(report: str, sources: List[Dict[str, Any]]) -> str:
     # Strip subtask tags before citation pass
     report = _strip_subtask_tags(report)
-    sources_text = "\n".join(
-        f"- {s.get('title', 'Source')} | {s.get('url')} | {s.get('description', '')}"
-        for s in sources[:50]
-        if s.get("url")
-    )
-    try:
-        truncated = report[:60000] if len(report) > 60000 else report
-        result = _chat(
-            role="citation",
-            messages=[{
-                "role": "system",
-                "content": CITATION_SYSTEM.format(report=truncated, sources=sources_text),
-            }],
-            temperature=0.1,
-            max_tokens=8192,
-        )
-        # Continue if truncated
-        result = _continue_if_truncated(result, "citation pass", "", max_rounds=3)
-        # Strip any remaining tags
-        result = _strip_subtask_tags(result)
-        return result
-    except Exception as e:
-        logger.warning(f"Citation agent failed: {e}")
-        return report
+    def _format_sources(limit: int, desc_limit: int) -> str:
+        lines: List[str] = []
+        seen_urls = set()
+        for src in sources:
+            url = str(src.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            title = str(src.get("title") or "Source").strip()
+            description = str(src.get("description") or "").replace("\n", " ").strip()
+            if len(description) > desc_limit:
+                description = description[:desc_limit].rstrip() + "..."
+            lines.append(f"- {title} | {url} | {description}")
+            if len(lines) >= limit:
+                break
+        return "\n".join(lines)
+
+    attempt_plan = [
+        (60000, 50, 320, 8192),
+        (45000, 35, 240, 6144),
+        (32000, 24, 180, 4096),
+        (22000, 16, 140, 3072),
+    ]
+
+    for idx, (report_limit, source_limit, desc_limit, out_tokens) in enumerate(attempt_plan, start=1):
+        try:
+            truncated_report = report[:report_limit] if len(report) > report_limit else report
+            sources_text = _format_sources(source_limit, desc_limit)
+            if not sources_text:
+                logger.warning("Citation pass skipped due to missing usable source URLs.")
+                return report
+
+            result = _chat(
+                role="citation",
+                messages=[{
+                    "role": "system",
+                    "content": CITATION_SYSTEM.format(report=truncated_report, sources=sources_text),
+                }],
+                temperature=0.1,
+                max_tokens=out_tokens,
+            )
+            result = _continue_if_truncated(result, "citation pass", "", max_rounds=3)
+            result = _strip_subtask_tags(result)
+            return result
+        except Exception as e:
+            lower = str(e).lower()
+            logger.warning(
+                "Citation agent attempt %s/%s failed (report=%s chars, sources=%s): %s",
+                idx,
+                len(attempt_plan),
+                report_limit,
+                source_limit,
+                e,
+            )
+            if any(token in lower for token in ["400", "too long", "max", "context"]):
+                continue
+            break
+
+    logger.warning("Citation agent failed after retries; returning uncited synthesized report.")
+    return report

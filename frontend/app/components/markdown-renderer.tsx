@@ -9,25 +9,28 @@ export function MarkdownRenderer({ content }: { content: string }) {
       remarkPlugins={[remarkGfm]}
       components={{
         h1: ({ children }) => (
-          <h1 className="text-2xl font-bold mt-6 mb-3 text-[var(--foreground)]">{children}</h1>
+          <h1 className="text-2xl font-bold mt-8 mb-4 pb-2 border-b border-white/10 text-[var(--foreground)]">{children}</h1>
         ),
         h2: ({ children }) => (
-          <h2 className="text-xl font-semibold mt-5 mb-2 text-[var(--foreground)]">{children}</h2>
+          <h2 className="text-xl font-semibold mt-7 mb-3 pb-1.5 border-b border-white/[0.06] text-[var(--foreground)]">{children}</h2>
         ),
         h3: ({ children }) => (
-          <h3 className="text-lg font-medium mt-4 mb-2 text-[var(--foreground)]">{children}</h3>
+          <h3 className="text-lg font-medium mt-5 mb-2 text-[var(--foreground)]">{children}</h3>
+        ),
+        h4: ({ children }) => (
+          <h4 className="text-base font-medium mt-4 mb-2 text-[var(--foreground)]/90">{children}</h4>
         ),
         p: ({ children }) => (
-          <p className="mb-3 leading-relaxed text-[var(--foreground)]">{children}</p>
+          <p className="mb-4 leading-7 text-[var(--foreground)]">{children}</p>
         ),
         ul: ({ children }) => (
-          <ul className="list-disc pl-5 mb-3 space-y-1">{children}</ul>
+          <ul className="list-disc pl-6 mb-4 space-y-2">{children}</ul>
         ),
         ol: ({ children }) => (
-          <ol className="list-decimal pl-5 mb-3 space-y-1">{children}</ol>
+          <ol className="list-decimal pl-6 mb-4 space-y-2">{children}</ol>
         ),
         li: ({ children }) => (
-          <li className="text-[var(--foreground)] leading-relaxed">{children}</li>
+          <li className="text-[var(--foreground)] leading-7 pl-1">{children}</li>
         ),
         a: ({ href, children }) => (
           <a
@@ -74,9 +77,12 @@ export function MarkdownRenderer({ content }: { content: string }) {
         td: ({ children }) => (
           <td className="px-4 py-2 text-sm border-b border-[var(--border)]">{children}</td>
         ),
-        hr: () => <hr className="my-6 border-[var(--border)]" />,
+        hr: () => <hr className="my-8 border-[var(--border)]/50" />,
         strong: ({ children }) => (
           <strong className="font-semibold text-[var(--foreground)]">{children}</strong>
+        ),
+        em: ({ children }) => (
+          <em className="italic text-[var(--foreground)]/80">{children}</em>
         ),
       }}
     >

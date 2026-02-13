@@ -511,8 +511,32 @@ export function ResearchChat({
                     <SearchDisplay events={msg.events} />
                   )}
                   {msg.finalReport && (
-                    <div className="mt-4 glass rounded-2xl p-6 prose prose-invert prose-sm max-w-none prose-headings:text-white/90 prose-p:text-white/70 prose-a:text-violet-400 prose-strong:text-white/80 prose-code:text-violet-300 prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10">
-                      <MarkdownRenderer content={msg.finalReport} />
+                    <div className="mt-4 glass rounded-2xl overflow-hidden">
+                      {/* Copy button header */}
+                      <div className="flex items-center justify-between px-6 py-3 border-b border-white/[0.06] bg-white/[0.02]">
+                        <span className="text-xs font-medium text-white/40 uppercase tracking-wider">Research Report</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(msg.finalReport || "").then(() => {
+                              const btn = document.getElementById(`copy-btn-${msg.id}`);
+                              if (btn) {
+                                btn.textContent = "Copied!";
+                                setTimeout(() => { btn.textContent = "Copy Report"; }, 2000);
+                              }
+                            });
+                          }}
+                          id={`copy-btn-${msg.id}`}
+                          className="inline-flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border border-white/10 bg-white/[0.04] text-white/50 hover:text-white/80 hover:bg-white/[0.08] transition-colors"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                          Copy Report
+                        </button>
+                      </div>
+                      {/* Report body */}
+                      <div className="px-6 py-6 sm:px-8 sm:py-8 prose prose-invert max-w-none prose-headings:text-white/90 prose-p:text-white/70 prose-a:text-violet-400 prose-strong:text-white/85 prose-code:text-violet-300 prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-li:text-white/70 prose-blockquote:text-white/50 prose-h1:text-2xl prose-h1:mt-8 prose-h1:mb-4 prose-h2:text-xl prose-h2:mt-7 prose-h2:mb-3 prose-h3:text-lg prose-h3:mt-5 prose-h3:mb-2 prose-p:mb-4 prose-p:leading-7 prose-li:leading-7 prose-ul:mb-4 prose-ol:mb-4 prose-hr:my-8 prose-hr:border-white/10">
+                        <MarkdownRenderer content={msg.finalReport} />
+                      </div>
                     </div>
                   )}
                 </div>
