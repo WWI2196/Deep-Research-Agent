@@ -1,8 +1,10 @@
-"""Firecrawl search and content-extraction helpers.
+"""Search and content-extraction helpers.
 
-Firecrawl v4 SDK returns Pydantic models (SearchData, etc.) instead of
-plain dicts.  The helpers below normalise every response into the
-``{"data": [...]}`` shape that the rest of the pipeline expects.
+Primary: Firecrawl (v4 SDK – returns Pydantic models).
+Fallback: DuckDuckGo (free, no API key required).
+
+Every public function returns the ``{"data": [...]}`` shape
+that the rest of the pipeline expects.
 """
 
 import logging
@@ -10,16 +12,25 @@ import os
 import time
 from typing import Any, Dict, List
 
-from firecrawl import Firecrawl
-
 logger = logging.getLogger(__name__)
 
 FIRECRAWL_MAX_RETRIES = int(os.environ.get("FIRECRAWL_MAX_RETRIES", "3"))
 FIRECRAWL_BACKOFF_BASE = float(os.environ.get("FIRECRAWL_BACKOFF_BASE", "0.5"))
 
+# Track whether Firecrawl is usable this session (avoids repeated failures)
+_firecrawl_disabled = False
 
-def _get_firecrawl() -> Firecrawl:
-    return Firecrawl(api_key=os.environ.get("FIRECRAWL_API_KEY", ""))
+
+def _get_firecrawl():
+    """Return a Firecrawl client, or None if unavailable."""
+    try:
+        from firecrawl import Firecrawl
+    except ImportError:
+        return None
+    api_key = os.environ.get("FIRECRAWL_API_KEY", "")
+    if not api_key:
+        return None
+    return Firecrawl(api_key=api_key)
 
 
 def _retry(func, *args, **kwargs):
@@ -29,6 +40,10 @@ def _retry(func, *args, **kwargs):
             return func(*args, **kwargs)
         except Exception as exc:
             last_err = exc
+            err_str = str(exc).lower()
+            # Don't retry payment / auth errors
+            if any(k in err_str for k in ("payment", "402", "401", "403", "insufficient", "unauthorized")):
+                raise
             time.sleep(FIRECRAWL_BACKOFF_BASE * (2 ** attempt))
     raise last_err  # type: ignore
 
@@ -127,21 +142,81 @@ def _normalise_extract_response(result: Any) -> Dict[str, Any]:
 
 # ── public API ──────────────────────────────────────────────────────
 
+def _ddg_search(query: str, limit: int = 5) -> Dict[str, Any]:
+    """Free DuckDuckGo fallback – no API key needed."""
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            logger.warning("Neither ddgs nor duckduckgo_search installed; returning empty results")
+            return {"data": []}
+
+    items: List[Dict[str, Any]] = []
+    try:
+        results = list(DDGS(timeout=10).text(query, max_results=limit))
+        for r in results:
+            items.append({
+                "title": r.get("title", ""),
+                "url": r.get("href", r.get("link", "")),
+                "description": r.get("body", r.get("snippet", "")),
+            })
+    except Exception as exc:
+        logger.warning("DuckDuckGo search failed: %s", exc)
+    logger.info("DuckDuckGo → %d items for '%s'", len(items), query[:60])
+    return {"data": items}
+
+
 def search(query: str, limit: int = 5) -> Dict[str, Any]:
-    """Run a Firecrawl web search with retries.
+    """Run a web search with retries.
+
+    Tries Firecrawl first; if it fails (credits, auth, missing key),
+    falls back to DuckDuckGo for free.
 
     Always returns ``{"data": [<dict>, ...]}``.
     """
-    fc = _get_firecrawl()
-    raw = _retry(fc.search, query=query, limit=limit)
-    return _normalise_search_response(raw)
+    global _firecrawl_disabled
+
+    # ── try Firecrawl ──
+    if not _firecrawl_disabled:
+        fc = _get_firecrawl()
+        if fc is not None:
+            try:
+                raw = _retry(fc.search, query=query, limit=limit)
+                result = _normalise_search_response(raw)
+                if result.get("data"):
+                    return result
+                # Firecrawl returned empty data – try DDG
+                logger.info("Firecrawl returned 0 items for '%s', trying DuckDuckGo", query)
+            except Exception as exc:
+                err = str(exc).lower()
+                if any(k in err for k in ("payment", "402", "insufficient", "credit")):
+                    logger.warning("Firecrawl credits exhausted – disabling for this session. Using DuckDuckGo.")
+                    _firecrawl_disabled = True
+                else:
+                    logger.warning("Firecrawl search error: %s – falling back to DuckDuckGo", exc)
+
+    # ── fallback: DuckDuckGo ──
+    return _ddg_search(query, limit=limit)
 
 
 def extract(urls: List[str], prompt: str) -> Dict[str, Any]:
     """Extract structured content from URLs via Firecrawl.
 
+    Falls back gracefully if Firecrawl is unavailable.
     Always returns a plain dict.
     """
+    if _firecrawl_disabled:
+        return {"data": None}
+
     fc = _get_firecrawl()
-    raw = _retry(fc.extract, urls, prompt=prompt)
-    return _normalise_extract_response(raw)
+    if fc is None:
+        return {"data": None}
+
+    try:
+        raw = _retry(fc.extract, urls, prompt=prompt)
+        return _normalise_extract_response(raw)
+    except Exception as exc:
+        logger.warning("Firecrawl extract failed: %s", exc)
+        return {"data": None}

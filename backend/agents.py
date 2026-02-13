@@ -133,14 +133,17 @@ def _continue_if_truncated(report: str, user_query: str, context: str) -> str:
     
     # Check for signs of truncation
     last_100 = report[-100:].strip()
-    truncation_signs = [
-        not last_100.endswith(('.', '!', '?', ':', '\n', ')', ']', '```')),
-        last_100.endswith((',', 'and', 'the', 'of', 'in', 'to', 'a')),
-        report.count('## ') > 2 and ('## Sources' not in report and '## Bibliography' not in report and '## References' not in report and '## Open Questions' not in report and '## Conclusions' not in report),
-    ]
     
-    if sum(truncation_signs) >= 1:
-        logger.info("Report appears truncated, requesting continuation...")
+    # Hard sign: ends mid-sentence or with an open bracket
+    ends_cleanly = last_100.endswith(('.', '!', '?', ':', '\n', ')', ']', '```', '"', '**'))
+    # Hard sign: ends with a dangling connective
+    dangling_words = ('and', 'the', 'of', 'in', 'to', 'a', 'an', 'or', 'but', 'for', 'with', 'that', 'is', 'are', 'was')
+    last_word = last_100.split()[-1].rstrip('.,;:') if last_100.split() else ''
+    ends_with_dangling = last_word.lower() in dangling_words
+
+    # continue if there's a signal of truncation
+    if not ends_cleanly and ends_with_dangling:
+        logger.info("Report appears truncated (ends with '%s'), requesting continuation...", last_word)
         emit({"type": "subagent-step", "subtask_id": "synthesis", "subtask_title": "Report Synthesis", "step": "continuing", "message": "Report was truncated, continuing generation..."})
         try:
             continuation = _chat(

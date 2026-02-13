@@ -14,4 +14,5 @@ langsmith
 
 # Services
 firecrawl-py
+ddgs
 supabase

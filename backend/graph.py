@@ -160,6 +160,13 @@ def build_graph() -> StateGraph:
             logger.warning(f"Scaling failed, defaults: {e}")
             n = len(state.get("subtasks", []))
             state["scaling"] = {"complexity": "moderate", "subagent_count": n, "tool_calls_per_subagent": 10, "target_sources": n * 3}
+
+
+        # If scaling didn't return a subagent count, use the subtasks count as a fallback
+        subtasks_count = len(state.get("subtasks", []))
+        if isinstance(state.get("scaling"), dict):
+            state["scaling"]["recommended_subagent_count"] = state["scaling"].get("subagent_count", subtasks_count)
+            state["scaling"]["subagent_count"] = subtasks_count
         emit({"type": "scaling-computed", "scaling": state["scaling"]})
         _emit_progress("scale")
         _finish_phase("scale")

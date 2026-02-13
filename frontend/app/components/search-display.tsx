@@ -28,6 +28,7 @@ interface SubagentState {
   extractions: { url: string; status: string }[];
   evidenceCount: number;
   reportLength: number;
+  iteration: number; // 1 = initial, >1 = gap-fill
 }
 
 interface LLMCall {
@@ -821,41 +822,67 @@ function SidebarAgents({ subagents }: { subagents: SubagentState[] }) {
     error: "text-red-400",
   };
 
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2 px-1">
-        <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-indigo-500/20 to-violet-500/20 flex items-center justify-center">
-          <svg className="w-3 h-3 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
+  const initialAgents = subagents.filter(a => a.iteration <= 1);
+  const gapFillAgents = subagents.filter(a => a.iteration > 1);
+
+  const renderAgentRow = (agent: SubagentState) => (
+    <div key={agent.id} className="glass rounded-lg px-2.5 py-2 animate-fade-in">
+      <div className="flex items-center gap-2">
+        <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+          agent.status === "complete" ? "bg-emerald-400" :
+          agent.status === "pending" ? "bg-white/15" :
+          "bg-violet-400 animate-pulse"
+        }`} />
+        <span className="text-[11px] text-white/60 truncate flex-1">{agent.title}</span>
+        <span className={`text-[9px] font-medium ${statusColors[agent.status] || "text-white/30"}`}>
+          {agent.status === "complete" ? "Done" : agent.status.replace(/-/g, " ")}
+        </span>
+      </div>
+      {agent.sources.length > 0 && (
+        <div className="mt-1 ml-3.5">
+          <div className="text-[10px] text-white/20">{agent.sources.length} sources, {agent.evidenceCount} evidence</div>
         </div>
-        <div className="text-xs font-semibold text-white/60">
-          Agents ({subagents.filter(a => a.status === "complete").length}/{subagents.length})
+      )}
+    </div>
+  );
+
+  return (
+    <div className="space-y-3">
+      {/* Initial Agents */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 px-1">
+          <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-indigo-500/20 to-violet-500/20 flex items-center justify-center">
+            <svg className="w-3 h-3 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </div>
+          <div className="text-xs font-semibold text-white/60">
+            Agents ({subagents.filter(a => a.status === "complete").length}/{subagents.length})
+          </div>
+        </div>
+        <div className="space-y-1">
+          {initialAgents.map(renderAgentRow)}
         </div>
       </div>
 
-      <div className="space-y-1">
-        {subagents.map((agent) => (
-          <div key={agent.id} className="glass rounded-lg px-2.5 py-2 animate-fade-in">
-            <div className="flex items-center gap-2">
-              <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                agent.status === "complete" ? "bg-emerald-400" :
-                agent.status === "pending" ? "bg-white/15" :
-                "bg-violet-400 animate-pulse"
-              }`} />
-              <span className="text-[11px] text-white/60 truncate flex-1">{agent.title}</span>
-              <span className={`text-[9px] font-medium ${statusColors[agent.status] || "text-white/30"}`}>
-                {agent.status === "complete" ? "Done" : agent.status.replace(/-/g, " ")}
-              </span>
+      {/* Gap-Fill Agents */}
+      {gapFillAgents.length > 0 && (
+        <div className="space-y-2 pt-2 border-t border-white/[0.06]">
+          <div className="flex items-center gap-2 px-1">
+            <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-amber-500/20 to-orange-500/20 flex items-center justify-center">
+              <svg className="w-3 h-3 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v3m0 0v3m0-3h3m-3 0H9m12 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
             </div>
-            {agent.sources.length > 0 && (
-              <div className="mt-1 ml-3.5">
-                <div className="text-[10px] text-white/20">{agent.sources.length} sources, {agent.evidenceCount} evidence</div>
-              </div>
-            )}
+            <div className="text-xs font-semibold text-amber-400/70">
+              Gap-Fill ({gapFillAgents.filter(a => a.status === "complete").length}/{gapFillAgents.length})
+            </div>
           </div>
-        ))}
-      </div>
+          <div className="space-y-1">
+            {gapFillAgents.map(renderAgentRow)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -990,14 +1017,13 @@ function PhaseContent({
 
       {/* Scaling */}
       {step.id === "scale" && state.scalingInfo && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           {[
             {
               value: state.scalingInfo.complexity,
               label: "Complexity",
               gradient: true,
             },
-            { value: state.scalingInfo.subagent_count, label: "Agents" },
             {
               value: state.scalingInfo.target_sources,
               label: "Target Sources",
@@ -1316,6 +1342,7 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
         if (!phaseStartOrder.includes("subagents"))
           phaseStartOrder.push("subagents");
         currentPhase = "subagents";
+        const launchIteration = e.iteration || 1;
         for (const agent of e.agent_details || []) {
           if (!subagents[agent.id]) {
             subagents[agent.id] = {
@@ -1329,6 +1356,7 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
               extractions: [],
               evidenceCount: 0,
               reportLength: 0,
+              iteration: launchIteration,
             };
           }
         }
@@ -1590,9 +1618,20 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
           </div>
         </div>
 
-        {/* Two-column layout: main process + sidebar sources */}
+        {/* Three-column layout: sources + main process + agents sidebar */}
         <div className="flex gap-4">
-          {/* Main content */}
+          {/* LEFT: Sticky Sources */}
+          {state.allSources.length > 0 && (
+            <div className="hidden lg:block w-64 xl:w-72 flex-shrink-0">
+              <div className="sticky top-4 max-h-[calc(100vh-180px)] overflow-y-auto scrollbar-hide pr-1">
+                <div className="glass rounded-2xl p-4">
+                  <SourcesPanel sources={state.allSources} />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* CENTER: Main content */}
           <div className="flex-1 min-w-0 space-y-3">
             {/* Collapsible research process */}
             <details className="glass rounded-2xl overflow-hidden group">
@@ -1628,11 +1667,13 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
             </details>
           </div>
 
-          {/* Sidebar: Sources */}
-          {state.allSources.length > 0 && (
-            <div className="hidden lg:block w-72 xl:w-80 flex-shrink-0 self-start">
-              <div className="glass rounded-2xl p-4 sticky top-4 max-h-[calc(100vh-180px)] overflow-y-auto scrollbar-hide">
-                <SourcesPanel sources={state.allSources} />
+          {/* RIGHT: Agents summary */}
+          {state.subagents.length > 0 && (
+            <div className="hidden lg:block w-64 xl:w-72 flex-shrink-0">
+              <div className="sticky top-4 max-h-[calc(100vh-180px)] overflow-y-auto scrollbar-hide pl-1">
+                <div className="glass rounded-2xl p-4">
+                  <SidebarAgents subagents={state.subagents} />
+                </div>
               </div>
             </div>
           )}
@@ -1681,9 +1722,20 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
         </div>
       )}
 
-      {/* Two-column layout: phases + sidebar */}
+      {/* Three-column layout: sources + phases + sidebar */}
       <div className="flex gap-4">
-        {/* Main: Phase Timeline */}
+        {/* LEFT: Sticky Sources */}
+        {state.allSources.length > 0 && (
+          <div className="hidden lg:block w-64 xl:w-72 flex-shrink-0">
+            <div className="sticky top-4 max-h-[calc(100vh-120px)] overflow-y-auto scrollbar-hide pr-1">
+              <div className="glass rounded-2xl p-4">
+                <SourcesPanel sources={state.allSources} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* CENTER: Phase Timeline */}
         <div className="flex-1 min-w-0">
           <div className="glass rounded-2xl overflow-hidden">
             {/* Mini phase dots at top */}
@@ -1728,33 +1780,30 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
           </div>
         </div>
 
-        {/* Sidebar: Progress + Agents + Sources + Activity */}
-        <div className="hidden lg:flex flex-col gap-3 w-72 xl:w-80 flex-shrink-0 self-start sticky top-4 max-h-[calc(100vh-180px)] overflow-y-auto scrollbar-hide pr-1">
-          {/* Progress panel */}
-          <div className="glass rounded-2xl p-4">
-            <SidebarProgress steps={state.steps} currentPhase={state.currentPhase} />
+        {/* RIGHT: Sticky Progress + Agents + Activity */}
+        <div className="hidden lg:block w-64 xl:w-72 flex-shrink-0">
+          <div className="sticky top-4 max-h-[calc(100vh-120px)] overflow-y-auto scrollbar-hide pl-1">
+            <div className="flex flex-col gap-3">
+              {/* Progress panel */}
+              <div className="glass rounded-2xl p-4">
+                <SidebarProgress steps={state.steps} currentPhase={state.currentPhase} />
+              </div>
+
+              {/* Agents panel */}
+              {state.subagents.length > 0 && (
+                <div className="glass rounded-2xl p-4">
+                  <SidebarAgents subagents={state.subagents} />
+                </div>
+              )}
+
+              {/* Activity feed */}
+              {state.subagents.some(a => a.searches.length > 0 || a.extractions.length > 0) && (
+                <div className="glass rounded-2xl p-4">
+                  <ActivityFeed subagents={state.subagents} llmCalls={state.llmCalls} />
+                </div>
+              )}
+            </div>
           </div>
-
-          {/* Agents panel */}
-          {state.subagents.length > 0 && (
-            <div className="glass rounded-2xl p-4">
-              <SidebarAgents subagents={state.subagents} />
-            </div>
-          )}
-
-          {/* Sources panel */}
-          {state.allSources.length > 0 && (
-            <div className="glass rounded-2xl p-4">
-              <SourcesPanel sources={state.allSources} />
-            </div>
-          )}
-
-          {/* Activity feed */}
-          {state.subagents.some(a => a.searches.length > 0 || a.extractions.length > 0) && (
-            <div className="glass rounded-2xl p-4">
-              <ActivityFeed subagents={state.subagents} llmCalls={state.llmCalls} />
-            </div>
-          )}
         </div>
       </div>
 
