@@ -8,7 +8,7 @@ A multi-agent, citation-aware research system that plans, delegates, reflects, a
 
 This project combines a FastAPI + LangGraph backend with a modern Next.js interface to deliver an end-to-end research workflow: from user query to structured, source-backed final report.
 
-## Why this project
+## Features
 
 - Multi-agent orchestration: parallel subagents investigate different angles of the same problem.
 - Reflection loop: the system audits its own coverage, detects gaps, and launches additional follow-up tasks when needed.
@@ -18,6 +18,26 @@ This project combines a FastAPI + LangGraph backend with a modern Next.js interf
 - Resilient search layer: Firecrawl is primary; if unavailable or failing, DuckDuckGo takes over transparently — zero config needed.
 
 The result is a research assistant that is significantly more rigorous than a single-shot chat response and much better suited for deep, multi-step analysis.
+
+---
+
+## Screenshots
+
+Research dashboard
+
+![Research Live](assets/research-live.png)
+
+Research Sub-Agents
+
+![Sticky Sidebars](assets/subagents-panel.png)
+
+Refection and Gap Analysis
+
+![Reflection](assets/reflection.png)
+
+Final synthesized report
+
+![Final Report](assets/final-report.png)
 
 ---
 
@@ -192,63 +212,14 @@ Both sidebars are **sticky** — they remain visible as the user scrolls through
 - If returned `subtasks` is empty: `research_complete = true` and pipeline proceeds to synthesis.
 
 
----
-
-## Screenshots
-
-Research dashboard
-
-![Research Live](assets/research-live.png)
-
-Research Sub-Agents
-
-![Sticky Sidebars](assets/subagents-panel.png)
-
-Refection and Gap Analysis
-
-![Reflection](assets/reflection.png)
-
-Final synthesized report
-
-![Final Report](assets/final-report.png)
-
----
-
 ## Tech stack
 
 ```mermaid
-graph TB
-    subgraph Frontend
-        NX["Next.js 15"] --> RE["React 19"]
-        RE --> TS["TypeScript"]
-        RE --> TW["Tailwind CSS v4"]
-        RE --> MD["React Markdown + GFM"]
-        RE --> SSE["SSE client stream parser"]
-    end
-
-    subgraph Backend
-        FA["FastAPI + Uvicorn"] --> LG["LangGraph"]
-        LG --> FC["Firecrawl (primary search)"]
-        LG --> DDG["ddgs / DuckDuckGo (fallback search)"]
-        FA --> PA["Provider adapters"]
-        PA --> OAI["OpenAI SDK (incl. Gemini-compatible endpoint)"]
-        FA --> PD["Pydantic"]
-        FA --> LS["LangSmith (optional)"]
-        FA --> SB["Supabase (optional)"]
-    end
-
-    subgraph "Model Providers"
-        GM["Gemini"]
-        OA["OpenAI"]
-        AN["Anthropic"]
-        HF["HuggingFace"]
-    end
-
-    Frontend -- SSE stream --> Backend
-    Backend --> GM & OA & AN & HF
-
-    style Frontend fill:#1e1b4b,color:#c4b5fd,stroke:#6366f1
-    style Backend fill:#1e1b4b,color:#93c5fd,stroke:#3b82f6
+flowchart LR
+    FE["Frontend\nNext.js + React"] -->|SSE| BE["Backend\nFastAPI + LangGraph"]
+    BE --> SEARCH["Search Layer\nFirecrawl -> DuckDuckGo fallback"]
+    BE --> MODELS["LLM Providers\nGemini | OpenAI | Anthropic | HuggingFace"]
+    BE --> DATA["Data/Obs (optional)\nSupabase | LangSmith"]
 ```
 
 ---
