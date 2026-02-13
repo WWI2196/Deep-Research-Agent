@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { SearchDisplay } from "./search-display";
 import { MarkdownRenderer } from "./markdown-renderer";
 
@@ -34,11 +34,15 @@ export type ResearchEvent =
   | { type: "complete"; message: string; run_id: string; total_sources?: number; total_reports?: number; iterations?: number; provider?: string; model?: string }
   | { type: "error"; error: string; phase?: string; hint?: string };
 
-const SUGGESTED_QUERIES = [
+const FALLBACK_TOPICS = [
   "Compare the economic impacts of AI automation across different industries",
   "What are the latest breakthroughs in quantum computing?",
   "Analyze the global impact of microplastics on marine ecosystems",
   "How does SpaceX's Starship compare to NASA's SLS?",
+  "Which clean-energy technologies are scaling fastest and why?",
+  "How are AI agents changing software engineering workflows in 2026?",
+  "What are the strongest policy options for regulating frontier AI models?",
+  "How are global semiconductor supply chains evolving after recent shocks?",
 ];
 
 /* ── Clean report content ────────────────────────────────────── */
@@ -112,6 +116,8 @@ function ModelSelector({
     huggingface: "text-yellow-400",
   };
 
+  const modelEntries = Object.entries(availableModels);
+
   return (
     <div ref={ref} className="relative">
       <button
@@ -123,7 +129,7 @@ function ModelSelector({
         <span className={`inline-flex items-center justify-center min-w-4 h-4 rounded-md bg-white/5 text-[9px] font-semibold ${providerColors[selectedProvider] || "text-white/50"}`}>
           {providerBadges[selectedProvider] || "-"}
         </span>
-        <span className="truncate max-w-[120px]">{selectedModel}</span>
+        <span className="truncate max-w-[120px]">{selectedModel || "Select model"}</span>
         <svg className={`w-3 h-3 text-white/20 transition-transform ${open ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
@@ -131,7 +137,12 @@ function ModelSelector({
 
       {open && (
         <div className="absolute bottom-full left-0 mb-2 w-64 glass rounded-2xl border border-white/10 shadow-xl shadow-black/30 overflow-hidden z-50 animate-fade-in">
-          {Object.entries(availableModels).map(([provider, models]) => (
+          {modelEntries.length === 0 && (
+            <div className="px-3 py-3 text-xs text-white/40">
+              No models available yet
+            </div>
+          )}
+          {modelEntries.map(([provider, models]) => (
             <div key={provider}>
               <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-white/25 font-semibold flex items-center gap-1.5 border-b border-white/[0.04]">
                 <span className={`inline-flex items-center justify-center min-w-4 h-4 rounded-md bg-white/5 text-[9px] font-semibold ${providerColors[provider] || "text-white/30"}`}>
@@ -191,20 +202,80 @@ export function ResearchChat({
   const [availableModels, setAvailableModels] = useState<Record<string, string[]>>({});
   const [selectedProvider, setSelectedProvider] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
+  const [suggestedQueries, setSuggestedQueries] = useState<string[]>(FALLBACK_TOPICS);
+  const [displayedCards, setDisplayedCards] = useState<string[]>(FALLBACK_TOPICS.slice(0, 4));
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [animatingCardIndex, setAnimatingCardIndex] = useState<number | null>(null);
+  const [cardAnimationPhase, setCardAnimationPhase] = useState<"idle" | "out" | "in">("idle");
   const lastSyncedModelRef = useRef("");
+  const topicCursorRef = useRef(4);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Fetch available models on mount
+  const fetchSuggestedTopics = useCallback(async (context?: string) => {
+    setSuggestionsLoading(true);
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/topics/suggestions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          count: 8,
+          context: context || undefined,
+          ...(selectedProvider && { provider: selectedProvider }),
+          ...(selectedModel && { model: selectedModel }),
+        }),
+      });
+      if (!response.ok) throw new Error("topics request failed");
+      const data = await response.json();
+      if (Array.isArray(data.topics) && data.topics.length > 0) {
+        setSuggestedQueries(data.topics);
+        topicCursorRef.current = Math.min(4, data.topics.length);
+        if (displayedCards.length === 0) {
+          setDisplayedCards(data.topics.slice(0, 4));
+        }
+      } else {
+        setSuggestedQueries(FALLBACK_TOPICS);
+        topicCursorRef.current = 4;
+      }
+    } catch {
+      setSuggestedQueries(FALLBACK_TOPICS);
+      topicCursorRef.current = 4;
+    } finally {
+      setSuggestionsLoading(false);
+    }
+  }, [displayedCards.length, selectedModel, selectedProvider]);
+
+  // Fetch available models on mount (with backend direct fallback)
   useEffect(() => {
-    fetch("/api/config")
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.available_models) setAvailableModels(data.available_models);
-        if (data.default_provider) setSelectedProvider(data.default_provider);
-        if (data.default_model) setSelectedModel(data.default_model);
-      })
-      .catch(() => { /* fallback: use defaults */ });
+    const fetchConfig = async () => {
+      try {
+        let data: any = null;
+        try {
+          const proxied = await fetch("/api/config");
+          if (proxied.ok) data = await proxied.json();
+        } catch {
+          /* continue */
+        }
+
+        if (!data) {
+          const direct = await fetch(`${BACKEND_URL}/api/config`);
+          if (direct.ok) data = await direct.json();
+        }
+
+        if (data?.available_models) setAvailableModels(data.available_models);
+        if (data?.default_provider) setSelectedProvider(data.default_provider);
+        if (data?.default_model) setSelectedModel(data.default_model);
+      } catch {
+        setAvailableModels({});
+      }
+    };
+    void fetchConfig();
   }, []);
+
+  useEffect(() => {
+    if (messages.length === 0) {
+      void fetchSuggestedTopics();
+    }
+  }, [fetchSuggestedTopics, messages.length]);
 
   useEffect(() => {
     if (selectedProvider && selectedModel) {
@@ -221,6 +292,53 @@ export function ResearchChat({
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  useEffect(() => {
+    if (messages.length > 0) return;
+    if (displayedCards.length === 0) {
+      const source = suggestedQueries.length > 0 ? suggestedQueries : FALLBACK_TOPICS;
+      setDisplayedCards(source.slice(0, 4));
+      topicCursorRef.current = Math.min(4, source.length);
+    }
+  }, [displayedCards.length, messages.length, suggestedQueries]);
+
+  useEffect(() => {
+    if (messages.length > 0 || displayedCards.length === 0) return;
+
+    const interval = setInterval(() => {
+      if (cardAnimationPhase !== "idle") return;
+      const source = suggestedQueries.length > 0 ? suggestedQueries : FALLBACK_TOPICS;
+      if (source.length <= displayedCards.length) return;
+
+      const randomIndex = Math.floor(Math.random() * displayedCards.length);
+      setAnimatingCardIndex(randomIndex);
+      setCardAnimationPhase("out");
+
+      setTimeout(() => {
+        setDisplayedCards((prev) => {
+          const nextCards = [...prev];
+          let nextTopic = source[topicCursorRef.current % source.length];
+          let guard = 0;
+          while (nextCards.includes(nextTopic) && guard < source.length) {
+            topicCursorRef.current += 1;
+            nextTopic = source[topicCursorRef.current % source.length];
+            guard += 1;
+          }
+          topicCursorRef.current += 1;
+          nextCards[randomIndex] = nextTopic;
+          return nextCards;
+        });
+        setCardAnimationPhase("in");
+
+        setTimeout(() => {
+          setCardAnimationPhase("idle");
+          setAnimatingCardIndex(null);
+        }, 260);
+      }, 220);
+    }, 3200);
+
+    return () => clearInterval(interval);
+  }, [cardAnimationPhase, displayedCards, messages.length, suggestedQueries]);
 
   const performSearch = async (query: string) => {
     if (!query.trim() || isSearching) return;
@@ -324,12 +442,32 @@ export function ResearchChat({
       >
         {/* Suggestion cards when empty */}
         {messages.length === 0 && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 opacity-0 animate-fade-up [animation-delay:700ms] [animation-fill-mode:forwards]">
-            {SUGGESTED_QUERIES.map((q, i) => (
+          <div className="mt-2 opacity-0 animate-fade-up [animation-delay:700ms] [animation-fill-mode:forwards]">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[11px] text-white/35 uppercase tracking-wider">
+                Rolling AI Topics
+              </div>
               <button
-                key={i}
+                type="button"
+                onClick={() => void fetchSuggestedTopics()}
+                disabled={suggestionsLoading}
+                className="text-[11px] px-2.5 py-1 rounded-lg glass text-white/50 hover:text-white/75 disabled:opacity-40 transition-colors"
+              >
+                {suggestionsLoading ? "Updating..." : "Refresh Topics"}
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 topic-roll-perspective">
+            {displayedCards.map((q, i) => (
+              <button
+                key={`${q}-${i}`}
                 onClick={() => performSearch(q)}
-                className="text-left p-4 rounded-2xl glass glass-interactive transition-all duration-300 group hover:shadow-lg hover:shadow-violet-500/5"
+                className={`text-left p-4 rounded-2xl glass glass-interactive transition-all duration-300 group hover:shadow-lg hover:shadow-violet-500/5 will-change-transform topic-roll-card ${
+                  animatingCardIndex === i && cardAnimationPhase === "out"
+                    ? "animate-topic-roll-out"
+                    : animatingCardIndex === i && cardAnimationPhase === "in"
+                      ? "animate-topic-roll-in"
+                      : ""
+                }`}
               >
                 <div className="flex items-start gap-3">
                   <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500/20 to-indigo-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -343,6 +481,7 @@ export function ResearchChat({
                 </div>
               </button>
             ))}
+            </div>
           </div>
         )}
 
@@ -404,18 +543,16 @@ export function ResearchChat({
               />
 
               {/* Model selector */}
-              {Object.keys(availableModels).length > 0 && (
-                <div className="pr-1">
-                  <ModelSelector
-                    availableModels={availableModels}
-                    selectedProvider={selectedProvider}
-                    selectedModel={selectedModel}
-                    onProviderChange={setSelectedProvider}
-                    onModelChange={setSelectedModel}
-                    disabled={isSearching}
-                  />
-                </div>
-              )}
+              <div className="pr-1">
+                <ModelSelector
+                  availableModels={availableModels}
+                  selectedProvider={selectedProvider}
+                  selectedModel={selectedModel}
+                  onProviderChange={setSelectedProvider}
+                  onModelChange={setSelectedModel}
+                  disabled={isSearching}
+                />
+              </div>
 
               <button
                 type="submit"

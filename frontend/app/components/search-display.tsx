@@ -1629,8 +1629,8 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
 
           {/* Sidebar: Sources */}
           {state.allSources.length > 0 && (
-            <div className="hidden lg:block w-72 xl:w-80 flex-shrink-0">
-              <div className="glass rounded-2xl p-4 sticky top-20">
+            <div className="hidden lg:block w-72 xl:w-80 flex-shrink-0 self-start">
+              <div className="glass rounded-2xl p-4 sticky top-4 max-h-[calc(100vh-180px)] overflow-y-auto scrollbar-hide">
                 <SourcesPanel sources={state.allSources} />
               </div>
             </div>
@@ -1728,7 +1728,7 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
         </div>
 
         {/* Sidebar: Progress + Agents + Sources + Activity */}
-        <div className="hidden lg:flex flex-col gap-3 w-72 xl:w-80 flex-shrink-0">
+        <div className="hidden lg:flex flex-col gap-3 w-72 xl:w-80 flex-shrink-0 self-start sticky top-4 max-h-[calc(100vh-180px)] overflow-y-auto scrollbar-hide pr-1">
           {/* Progress panel */}
           <div className="glass rounded-2xl p-4">
             <SidebarProgress steps={state.steps} currentPhase={state.currentPhase} />

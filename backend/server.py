@@ -8,8 +8,9 @@ import asyncio
 import json
 import os
 import queue
+import re
 import uuid
-from typing import Optional
+from typing import Optional, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -63,6 +64,13 @@ class ResearchResponse(BaseModel):
     report: Optional[str] = None
 
 
+class TopicSuggestionsRequest(BaseModel):
+    context: Optional[str] = None
+    count: Optional[int] = 4
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
 # ── helpers ──────────────────────────────────────────────────────────
 
 def serialize_event(event_type: str, data: dict) -> str:
@@ -85,6 +93,99 @@ def _get_error_hint(error_msg: str) -> str:
     if "rate" in lower or "429" in lower:
         return "Rate limited. The system will retry automatically."
     return ""
+
+
+def _fallback_topics() -> List[str]:
+    return [
+        "Compare the economic impacts of AI automation across different industries",
+        "What are the latest breakthroughs in quantum computing?",
+        "Analyze the global impact of microplastics on marine ecosystems",
+        "How does SpaceX Starship compare to NASA SLS for deep-space missions?",
+        "What policy approaches best regulate frontier AI models?",
+        "Which battery technologies are most promising beyond lithium-ion?",
+        "How are supply chains adapting to climate and geopolitical shocks?",
+        "What does recent evidence say about remote work and productivity?",
+    ]
+
+
+def _parse_topic_suggestions(raw: str, count: int) -> List[str]:
+    text = (raw or "").strip()
+    if not text:
+        return _fallback_topics()[:count]
+
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+
+    candidates: List[str] = []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            candidates = [str(item).strip() for item in parsed if isinstance(item, str)]
+        elif isinstance(parsed, dict):
+            for key in ("topics", "suggestions", "queries"):
+                value = parsed.get(key)
+                if isinstance(value, list):
+                    candidates = [str(item).strip() for item in value if isinstance(item, str)]
+                    break
+    except Exception:
+        lines = [line.strip(" -•\t") for line in text.splitlines()]
+        candidates = [line for line in lines if len(line) > 12]
+
+    cleaned: List[str] = []
+    seen = set()
+    for topic in candidates:
+        normalized = re.sub(r"\s+", " ", topic).strip()
+        if len(normalized) < 12:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(normalized)
+
+    if not cleaned:
+        return _fallback_topics()[:count]
+    return cleaned[:count]
+
+
+def _generate_topic_suggestions(
+    context: Optional[str],
+    count: int,
+    provider: Optional[str],
+    model: Optional[str],
+) -> dict:
+    cfg = get_config()
+    effective_provider = provider or cfg.default_provider
+    effective_model = model or cfg.default_model
+
+    prompt = (
+        "Generate fresh, high-quality deep-research topic ideas for a research assistant UI. "
+        f"Return exactly {count} suggestions as JSON: {{\"topics\": [\"...\"]}}. "
+        "Each topic should be specific, analytical, and suitable for multi-agent web research. "
+        "Avoid generic short prompts."
+    )
+    if context:
+        prompt += f"\n\nUser context hint: {context[:500]}"
+
+    provider_client = get_provider(effective_provider)
+    response = provider_client.chat(
+        model=effective_model,
+        messages=[
+            {
+                "role": "system",
+                "content": "You produce concise, relevant research topic suggestions in valid JSON.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.7,
+    )
+
+    topics = _parse_topic_suggestions(response, count)
+    return {
+        "topics": topics,
+        "provider": effective_provider,
+        "model": effective_model,
+    }
 
 
 def _translate_event(evt: dict) -> list:
@@ -435,3 +536,22 @@ async def health_check():
             "langsmith": bool(os.environ.get("LANGSMITH_API_KEY")),
         },
     }
+
+
+@app.post("/api/topics/suggestions")
+async def topic_suggestions(request: TopicSuggestionsRequest):
+    count = max(4, min(request.count or 4, 12))
+    try:
+        return _generate_topic_suggestions(
+            context=request.context,
+            count=count,
+            provider=request.provider,
+            model=request.model,
+        )
+    except Exception:
+        cfg = get_config()
+        return {
+            "topics": _fallback_topics()[:count],
+            "provider": request.provider or cfg.default_provider,
+            "model": request.model or cfg.default_model,
+        }

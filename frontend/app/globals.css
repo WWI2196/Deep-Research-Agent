@@ -135,6 +135,32 @@ body {
   50% { background-position: 100% 50%; }
 }
 
+@keyframes topic-roll-out {
+  0% {
+    opacity: 1;
+    transform: translateY(0) rotateX(0deg) rotateZ(0deg) scale(1);
+    filter: blur(0px);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-16px) rotateX(72deg) rotateZ(2deg) scale(0.97);
+    filter: blur(1.5px);
+  }
+}
+
+@keyframes topic-roll-in {
+  0% {
+    opacity: 0;
+    transform: translateY(16px) rotateX(-72deg) rotateZ(-2deg) scale(0.97);
+    filter: blur(1.5px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) rotateX(0deg) rotateZ(0deg) scale(1);
+    filter: blur(0px);
+  }
+}
+
 .animate-fade-in { animation: fade-in 0.4s ease-out forwards; }
 .animate-fade-up { animation: fade-up 0.5s ease-out forwards; }
 .animate-slide-down { animation: slide-down 0.3s ease-out forwards; }
@@ -150,6 +176,24 @@ body {
 .animate-gradient {
   background-size: 200% 200%;
   animation: gradient-x 6s ease infinite;
+}
+
+.topic-roll-perspective {
+  perspective: 1200px;
+}
+
+.topic-roll-card {
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+  transform-origin: center center;
+}
+
+.animate-topic-roll-out {
+  animation: topic-roll-out 240ms cubic-bezier(0.33, 1, 0.68, 1) forwards;
+}
+
+.animate-topic-roll-in {
+  animation: topic-roll-in 280ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
 }
 
 /* ── Gradient text ─────────────────────────────────────────────── */

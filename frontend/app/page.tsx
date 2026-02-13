@@ -3,8 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { ResearchChat } from "./components/research-chat";
 
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+
 export default function Home() {
   const [providerInfo, setProviderInfo] = useState<{ provider: string; model: string } | null>(null);
+  const [isOnline, setIsOnline] = useState<boolean>(false);
 
   const handleModelChange = useCallback((provider: string, model: string) => {
     setProviderInfo((prev) => {
@@ -16,10 +19,49 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/config")
-      .then((r) => r.json())
-      .then((data) => setProviderInfo({ provider: data.default_provider || "", model: data.default_model || "" }))
-      .catch(() => {});
+    const checkStatus = async () => {
+      try {
+        let cfg: any = null;
+        let healthOk = false;
+
+        try {
+          const [cfgRes, healthRes] = await Promise.all([
+            fetch("/api/config"),
+            fetch("/api/health"),
+          ]);
+          if (cfgRes.ok) cfg = await cfgRes.json();
+          healthOk = healthRes.ok;
+        } catch {
+          /* fallback below */
+        }
+
+        if (!cfg || !healthOk) {
+          try {
+            const [cfgResDirect, healthResDirect] = await Promise.all([
+              fetch(`${BACKEND_URL}/api/config`),
+              fetch(`${BACKEND_URL}/api/health`),
+            ]);
+            if (cfgResDirect.ok) cfg = await cfgResDirect.json();
+            healthOk = healthResDirect.ok;
+          } catch {
+            /* offline fallback */
+          }
+        }
+
+        if (cfg) {
+          setProviderInfo({ provider: cfg.default_provider || "", model: cfg.default_model || "" });
+        }
+        setIsOnline(healthOk);
+      } catch {
+        setIsOnline(false);
+      }
+    };
+
+    void checkStatus();
+    const interval = setInterval(() => {
+      void checkStatus();
+    }, 15000);
+    return () => clearInterval(interval);
   }, []);
 
   return (
@@ -39,14 +81,16 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {providerInfo && (
-              <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full glass text-[11px] text-white/50">
-                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="capitalize">{providerInfo.provider}</span>
-                <span className="text-white/20">|</span>
-                <span className="text-white/40">{providerInfo.model}</span>
-              </div>
-            )}
+            <div className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full glass text-[10px] sm:text-[11px] text-white/50">
+              <div className={`w-1.5 h-1.5 rounded-full ${isOnline ? "bg-emerald-400 animate-pulse" : "bg-red-400"}`} />
+              <span>{isOnline ? "Online" : "Offline"}</span>
+            </div>
+            <div className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full glass text-[10px] sm:text-[11px] text-white/50 max-w-[220px] sm:max-w-none">
+              <span className="text-white/30">Model:</span>
+              <span className="capitalize">{providerInfo?.provider || "-"}</span>
+              <span className="text-white/20">|</span>
+              <span className="text-white/40 max-w-[220px] truncate">{providerInfo?.model || "loading..."}</span>
+            </div>
             <a
               href="https://github.com"
               target="_blank"
