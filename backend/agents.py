@@ -58,6 +58,65 @@ def _clean_think_tags(content: str) -> str:
     return content
 
 
+def _extract_payload_from_result(result: Any) -> Optional[Any]:
+    """Normalize Firecrawl extract responses across SDK/version shapes."""
+    if result is None:
+        return None
+
+    if isinstance(result, dict):
+        if result.get("data") is not None:
+            return result.get("data")
+        if result.get("results") is not None:
+            return result.get("results")
+        if result.get("content") is not None:
+            return result.get("content")
+        if result.get("markdown") is not None:
+            return result.get("markdown")
+        return None
+
+    if isinstance(result, (list, str)):
+        return result
+
+    return None
+
+
+def _pick_first_nonempty(item: Dict[str, Any], keys: List[str]) -> str:
+    for key in keys:
+        value = item.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalize_search_item(item: Dict[str, Any], source_label: str) -> Optional[Dict[str, Any]]:
+    """Normalize Firecrawl search result records across SDK versions/providers."""
+    if not isinstance(item, dict):
+        return None
+
+    url = _pick_first_nonempty(
+        item,
+        ["url", "link", "sourceURL", "source_url", "href", "website", "canonical_url"],
+    )
+    if not url:
+        return None
+
+    title = _pick_first_nonempty(item, ["title", "name", "headline"]) or url
+    description = _pick_first_nonempty(
+        item,
+        ["description", "snippet", "summary", "content", "markdown", "text"],
+    )
+
+    return {
+        "title": title,
+        "url": url,
+        "description": description,
+        "source": source_label,
+    }
+
+
 def _strip_subtask_tags(text: str) -> str:
     """Remove bracket tags like [subtask_id] from report headings and body."""
     # Remove [word_word_word] patterns typically used as subtask IDs
@@ -432,12 +491,9 @@ def run_subagent(
         if not sr or not sr.get("data"):
             continue
         for item in sr["data"]:
-            raw_candidates.append({
-                "title": item.get("title"),
-                "url": item.get("url"),
-                "description": item.get("description"),
-                "source": "search",
-            })
+            normalized = _normalize_search_item(item, "search")
+            if normalized:
+                raw_candidates.append(normalized)
 
     # 3 — evaluate
     emit({"type": "subagent-step", "subtask_id": sid, "subtask_title": stitle, "step": "evaluating-sources", "message": f"Evaluating {len(raw_candidates)} candidates..."})
@@ -454,12 +510,9 @@ def run_subagent(
             if not sr or not sr.get("data"):
                 continue
             for item in sr["data"]:
-                raw_candidates.append({
-                    "title": item.get("title"),
-                    "url": item.get("url"),
-                    "description": item.get("description"),
-                    "source": "refined-search",
-                })
+                normalized = _normalize_search_item(item, "refined-search")
+                if normalized:
+                    raw_candidates.append(normalized)
         # Re-evaluate all candidates
         scored = batch_evaluate_sources(raw_candidates, subtask.get("objective", user_query))
         scored.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
@@ -504,13 +557,16 @@ def run_subagent(
     # 4 — extract
     emit({"type": "subagent-step", "subtask_id": sid, "subtask_title": stitle, "step": "extracting", "message": f"Extracting from {len(top_urls)} sources..."})
 
+    source_by_url = {s.get("url"): s for s in filtered if s.get("url")}
+
     def _extract(url):
         try:
             emit({"type": "subagent-extract", "subtask_id": sid, "url": url, "status": "started"})
             result = firecrawl.extract([url], f"Extract key facts about: {stitle}")
-            ok = bool(result and result.get("success"))
+            payload = _extract_payload_from_result(result)
+            ok = payload is not None
             emit({"type": "subagent-extract", "subtask_id": sid, "url": url, "status": "completed" if ok else "no-data"})
-            return url, result
+            return url, payload
         except Exception as e:
             emit({"type": "subagent-extract", "subtask_id": sid, "url": url, "status": "failed", "error": str(e)[:100]})
             return url, None
@@ -518,9 +574,16 @@ def run_subagent(
     with concurrent.futures.ThreadPoolExecutor() as pool:
         extract_results = list(pool.map(_extract, top_urls))
 
-    for url, er in extract_results:
-        if er and er.get("success"):
-            evidence.append({"url": url, "data": er.get("data")})
+    for url, payload in extract_results:
+        if payload is not None:
+            evidence.append({"url": url, "data": payload})
+            continue
+
+        # Fallback: preserve at least snippet-level evidence when extract yields no payload
+        src = source_by_url.get(url, {})
+        snippet = src.get("description") or src.get("title")
+        if snippet:
+            evidence.append({"url": url, "data": snippet})
 
     evidence_text = "\n\n".join(f"[From {e['url']}]: {e['data']}" for e in evidence)
 
