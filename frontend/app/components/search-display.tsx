@@ -1315,6 +1315,7 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
       if (e.type === "subagents-launch") {
         if (!phaseStartOrder.includes("subagents"))
           phaseStartOrder.push("subagents");
+        currentPhase = "subagents";
         for (const agent of e.agent_details || []) {
           if (!subagents[agent.id]) {
             subagents[agent.id] = {

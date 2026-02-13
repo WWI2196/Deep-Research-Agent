@@ -174,6 +174,7 @@ def build_graph() -> StateGraph:
         if not to_run:
             return state
 
+        emit({"type": "phase-start", "phase": "subagents", "message": f"Running {len(to_run)} subagents (iteration {iteration + 1})..."})
         emit({
             "type": "subagents-launch", "iteration": iteration + 1,
             "total_agents": len(to_run),
