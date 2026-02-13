@@ -196,13 +196,21 @@ Both sidebars are **sticky** — they remain visible as the user scrolls through
 
 ## Screenshots
 
-| Three-column research dashboard | Sources + agents visible while scrolling |
-|:---:|:---:|
-| ![Research Live](assets/research-live.png) | ![Sticky Sidebars](assets/subagents-panel.png) |
+Three-column research dashboard
 
-| Gap-fill agents after reflection | Final synthesized report |
-|:---:|:---:|
-| ![Reflection](assets/reflection.png) | ![Final Report](assets/final-report.png) |
+![Research Live](assets/research-live.png)
+
+Sources + agents visible while scrolling
+
+![Sticky Sidebars](assets/subagents-panel.png)
+
+Gap-fill agents after reflection
+
+![Reflection](assets/reflection.png)
+
+Final synthesized report
+
+![Final Report](assets/final-report.png)
 
 ---
 
