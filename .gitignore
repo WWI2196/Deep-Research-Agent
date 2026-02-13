@@ -1,2 +1,11 @@
 .env
 .venv
+reference_repos/
+
+node_modules/
+.next/
+dist/
+build/
+*.log
+*.tmp
+*.cache

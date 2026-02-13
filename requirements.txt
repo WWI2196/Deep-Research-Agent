@@ -1,7 +1,17 @@
 python-dotenv
-huggingface_hub
 pydantic
+fastapi
+uvicorn[standard]
+
+# LLM Providers
+openai
+anthropic
+huggingface_hub
+
+# Pipeline
 langgraph
 langsmith
-supabase
+
+# Services
 firecrawl-py
+supabase
