@@ -63,6 +63,10 @@ function cleanReportContent(raw: string): string {
   content = content.replace(/^```(?:markdown|md|json)?\s*\n?/i, "");
   content = content.replace(/\n?```\s*$/i, "");
 
+  // Strip bracket tags like [task_id_name] from headings and body
+  content = content.replace(/\[([a-z0-9_]+(?:_[a-z0-9_]+)+)\]\s*/g, "");
+  content = content.replace(/^\s*\[[a-z0-9_]+\]\s*/gm, "");
+
   return content.trim();
 }
 
@@ -242,7 +246,7 @@ export function ResearchChat({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           query,
-          max_iterations: 2,
+          max_iterations: 3,
           quality_threshold: 0.7,
           ...(selectedModel && { model: selectedModel }),
           ...(selectedProvider && { provider: selectedProvider }),

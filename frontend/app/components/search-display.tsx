@@ -629,11 +629,10 @@ function SubagentParallelBoard({ subagents }: { subagents: SubagentState[] }) {
 }
 
 /* ================================================================== */
-/* Sources Panel – vertical display of all gathered sources            */
+/* Sources Panel – vertical sidebar display of all gathered sources     */
 /* ================================================================== */
 
 function SourcesPanel({ sources }: { sources: GatheredSource[] }) {
-  const [isExpanded, setIsExpanded] = useState(true);
   if (sources.length === 0) return null;
 
   const sortedSources = [...sources].sort((a, b) => b.score - a.score);
@@ -648,102 +647,215 @@ function SourcesPanel({ sources }: { sources: GatheredSource[] }) {
   }
 
   return (
-    <div className="glass rounded-2xl overflow-hidden animate-fade-in">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-white/[0.015] transition-colors"
-      >
-        <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-emerald-500/20 to-cyan-500/20 flex items-center justify-center">
-          <svg
-            className="w-3.5 h-3.5 text-emerald-400"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"
-            />
+    <div className="space-y-3">
+      {/* Header */}
+      <div className="flex items-center gap-2.5 px-1">
+        <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-emerald-500/20 to-cyan-500/20 flex items-center justify-center">
+          <svg className="w-3 h-3 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
           </svg>
         </div>
-        <div className="flex-1 text-left">
-          <span className="text-sm font-medium text-white/70">
-            Sources Gathered
-          </span>
-          <span className="text-[10px] text-white/30 ml-2">
-            {sources.length} sources from {Object.keys(domainCounts).length}{" "}
-            domains
-          </span>
+        <div>
+          <div className="text-xs font-semibold text-white/60">Sources Gathered</div>
+          <div className="text-[10px] text-white/25">{sources.length} from {Object.keys(domainCounts).length} domains</div>
         </div>
-        <svg
-          className={`w-3.5 h-3.5 text-white/15 transition-transform ${
-            isExpanded ? "rotate-180" : ""
-          }`}
-          fill="none"
-          stroke="currentColor"
-          viewBox="0 0 24 24"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M19 9l-7 7-7-7"
-          />
-        </svg>
-      </button>
+      </div>
 
-      {isExpanded && (
-        <div className="px-4 pb-4 border-t border-white/[0.04] pt-3 animate-slide-down">
-          {/* Domain summary */}
-          <div className="flex flex-wrap gap-1.5 mb-3">
-            {Object.entries(domainCounts)
-              .sort(([, a], [, b]) => b - a)
-              .slice(0, 8)
-              .map(([domain, count]) => (
-                <span
-                  key={domain}
-                  className="text-[10px] px-2 py-0.5 rounded-full bg-white/[0.04] text-white/30 border border-white/[0.06]"
-                >
-                  {domain}{" "}
-                  <span className="text-white/50 font-medium">{count}</span>
-                </span>
-              ))}
+      {/* Domain tags */}
+      <div className="flex flex-wrap gap-1">
+        {Object.entries(domainCounts)
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 8)
+          .map(([domain, count]) => (
+            <span key={domain} className="text-[10px] px-2 py-0.5 rounded-full bg-white/[0.04] text-white/30 border border-white/[0.06]">
+              {domain} <span className="text-white/50 font-medium">{count}</span>
+            </span>
+          ))}
+      </div>
+
+      {/* Source list */}
+      <div className="space-y-1 max-h-[calc(100vh-400px)] overflow-y-auto scrollbar-hide">
+        {sortedSources.map((source, i) => (
+          <div key={i} className="flex items-center gap-2 py-1 animate-fade-in" style={{ animationDelay: `${i * 15}ms` }}>
+            <QualityBar score={source.score} />
+            <a
+              href={source.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[11px] text-white/40 hover:text-violet-400 truncate flex-1 transition-colors"
+            >
+              {source.title || (() => { try { return new URL(source.url).hostname; } catch { return source.url; } })()}
+            </a>
           </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
-          {/* Source list */}
-          <div className="space-y-1.5 max-h-60 overflow-y-auto scrollbar-hide">
-            {sortedSources.map((source, i) => (
-              <div
-                key={i}
-                className="flex items-center gap-2.5 py-1 animate-fade-in"
-                style={{ animationDelay: `${i * 20}ms` }}
-              >
-                <QualityBar score={source.score} />
-                <a
-                  href={source.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[11px] text-white/40 hover:text-violet-400 truncate flex-1 transition-colors"
-                >
-                  {source.title ||
-                    (() => {
-                      try {
-                        return new URL(source.url).hostname;
-                      } catch {
-                        return source.url;
-                      }
-                    })()}
-                </a>
-                <span className="text-[9px] text-white/15 flex-shrink-0">
-                  {source.subtask}
-                </span>
+/* ================================================================== */
+/* Sidebar Activity Feed — real-time web accesses and agent activity    */
+/* ================================================================== */
+
+function ActivityFeed({ subagents, llmCalls }: { subagents: SubagentState[]; llmCalls: LLMCall[] }) {
+  // Build a timeline of activity items
+  const activities: { type: string; label: string; detail: string; status: string; time: number }[] = [];
+
+  for (const agent of subagents) {
+    for (const search of agent.searches) {
+      activities.push({
+        type: "search",
+        label: agent.title,
+        detail: search.query,
+        status: search.status,
+        time: Date.now(),
+      });
+    }
+    for (const ext of agent.extractions) {
+      let hostname = ext.url;
+      try { hostname = new URL(ext.url).hostname.replace("www.", ""); } catch { /* skip */ }
+      activities.push({
+        type: "extract",
+        label: agent.title,
+        detail: hostname,
+        status: ext.status,
+        time: Date.now(),
+      });
+    }
+  }
+
+  const recent = activities.slice(-20).reverse();
+  if (recent.length === 0) return null;
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 px-1">
+        <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-blue-500/20 to-cyan-500/20 flex items-center justify-center">
+          <svg className="w-3 h-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        </div>
+        <div className="text-xs font-semibold text-white/60">Live Activity</div>
+      </div>
+
+      <div className="space-y-1 max-h-60 overflow-y-auto scrollbar-hide">
+        {recent.map((act, i) => (
+          <div key={i} className="flex items-center gap-2 text-[11px] animate-fade-in">
+            <StatusDot status={act.status} />
+            <span className="text-white/20 flex-shrink-0 w-12 truncate">
+              {act.type === "search" ? "Search" : "Extract"}
+            </span>
+            <span className="text-white/35 truncate flex-1">{act.detail}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* Sidebar Progress — mini phase timeline                              */
+/* ================================================================== */
+
+function SidebarProgress({ steps, currentPhase }: { steps: { id: string; label: string; status: string }[]; currentPhase: string }) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 px-1">
+        <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-violet-500/20 to-indigo-500/20 flex items-center justify-center">
+          <svg className="w-3 h-3 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+          </svg>
+        </div>
+        <div className="text-xs font-semibold text-white/60">Research Progress</div>
+      </div>
+
+      <div className="space-y-0.5">
+        {steps.filter(s => s.id !== "complete").map((step) => (
+          <div key={step.id} className="flex items-center gap-2.5 px-1 py-1">
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 transition-all duration-500 ${
+              step.status === "completed"
+                ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.3)]"
+                : step.status === "active"
+                  ? "bg-violet-400 animate-pulse shadow-[0_0_8px_rgba(139,92,246,0.4)]"
+                  : "bg-white/10"
+            }`} />
+            <span className={`text-[11px] flex-1 ${
+              step.status === "active" ? "text-violet-300 font-medium" :
+              step.status === "completed" ? "text-white/45" : "text-white/20"
+            }`}>
+              {step.label}
+            </span>
+            {step.status === "active" && (
+              <div className="w-3 h-3">
+                <div className="w-3 h-3 rounded-full border border-violet-400/30 border-t-violet-400 animate-spin" />
               </div>
-            ))}
+            )}
+            {step.status === "completed" && (
+              <svg className="w-3 h-3 text-emerald-400/60 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+              </svg>
+            )}
           </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================== */
+/* Agent Status Cards — compact cards for sidebar                      */
+/* ================================================================== */
+
+function SidebarAgents({ subagents }: { subagents: SubagentState[] }) {
+  if (subagents.length === 0) return null;
+
+  const statusColors: Record<string, string> = {
+    pending: "text-white/25",
+    "generating-queries": "text-blue-400",
+    searching: "text-cyan-400",
+    "evaluating-sources": "text-violet-400",
+    "refining-queries": "text-amber-400",
+    extracting: "text-orange-400",
+    "writing-report": "text-indigo-400",
+    complete: "text-emerald-400",
+    error: "text-red-400",
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 px-1">
+        <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-indigo-500/20 to-violet-500/20 flex items-center justify-center">
+          <svg className="w-3 h-3 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
         </div>
-      )}
+        <div className="text-xs font-semibold text-white/60">
+          Agents ({subagents.filter(a => a.status === "complete").length}/{subagents.length})
+        </div>
+      </div>
+
+      <div className="space-y-1">
+        {subagents.map((agent) => (
+          <div key={agent.id} className="glass rounded-lg px-2.5 py-2 animate-fade-in">
+            <div className="flex items-center gap-2">
+              <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                agent.status === "complete" ? "bg-emerald-400" :
+                agent.status === "pending" ? "bg-white/15" :
+                "bg-violet-400 animate-pulse"
+              }`} />
+              <span className="text-[11px] text-white/60 truncate flex-1">{agent.title}</span>
+              <span className={`text-[9px] font-medium ${statusColors[agent.status] || "text-white/30"}`}>
+                {agent.status === "complete" ? "Done" : agent.status.replace(/-/g, " ")}
+              </span>
+            </div>
+            {agent.sources.length > 0 && (
+              <div className="mt-1 ml-3.5">
+                <div className="text-[10px] text-white/20">{agent.sources.length} sources, {agent.evidenceCount} evidence</div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1425,81 +1537,50 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
   const activeSteps = state.steps.filter((s) => s.status !== "pending");
 
   /* =================================================================
-   * POST-REPORT LAYOUT — sidebar steps + main report
+   * POST-REPORT LAYOUT — sidebar sources + main report process
    * ================================================================= */
 
   if (state.isComplete) {
     return (
-      <div ref={containerRef} className="space-y-3 animate-fade-in">
+      <div ref={containerRef} className="animate-fade-in">
         {/* Completion banner */}
-        <div className="glass rounded-2xl px-5 py-4 border border-emerald-500/10 bg-emerald-500/[0.02]">
+        <div className="glass rounded-2xl px-5 py-4 border border-emerald-500/10 bg-emerald-500/[0.02] mb-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-8 h-8 rounded-xl bg-emerald-400/15 flex items-center justify-center">
-                <svg
-                  className="w-4 h-4 text-emerald-400"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M5 13l4 4L19 7"
-                  />
+                <svg className="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
               </div>
               <div>
-                <span className="text-sm font-semibold text-white/80">
-                  Research Complete
-                </span>
+                <span className="text-sm font-semibold text-white/80">Research Complete</span>
                 <span className="text-[11px] text-white/30 ml-2">
                   {Math.floor(elapsed / 1000)}s
                   {state.completionStats?.provider && (
-                    <>
-                      {" "}
-                      ·{" "}
-                      <span className="capitalize">
-                        {state.completionStats.provider}
-                      </span>
-                    </>
+                    <> · <span className="capitalize">{state.completionStats.provider}</span></>
                   )}
                 </span>
               </div>
             </div>
-
             <div className="flex items-center gap-4">
               {state.completionStats && (
                 <>
                   {state.completionStats.total_sources !== undefined && (
                     <div className="text-center">
-                      <span className="text-lg font-bold text-emerald-400">
-                        {state.completionStats.total_sources}
-                      </span>
-                      <span className="text-[10px] text-white/25 block">
-                        sources
-                      </span>
+                      <span className="text-lg font-bold text-emerald-400">{state.completionStats.total_sources}</span>
+                      <span className="text-[10px] text-white/25 block">sources</span>
                     </div>
                   )}
                   {state.completionStats.total_reports !== undefined && (
                     <div className="text-center">
-                      <span className="text-lg font-bold text-blue-400">
-                        {state.completionStats.total_reports}
-                      </span>
-                      <span className="text-[10px] text-white/25 block">
-                        reports
-                      </span>
+                      <span className="text-lg font-bold text-blue-400">{state.completionStats.total_reports}</span>
+                      <span className="text-[10px] text-white/25 block">reports</span>
                     </div>
                   )}
                   {state.completionStats.iterations !== undefined && (
                     <div className="text-center">
-                      <span className="text-lg font-bold text-violet-400">
-                        {state.completionStats.iterations}
-                      </span>
-                      <span className="text-[10px] text-white/25 block">
-                        iterations
-                      </span>
+                      <span className="text-lg font-bold text-violet-400">{state.completionStats.iterations}</span>
+                      <span className="text-[10px] text-white/25 block">iterations</span>
                     </div>
                   )}
                 </>
@@ -1508,93 +1589,66 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
           </div>
         </div>
 
-        {/* Collapsible research process */}
-        <details className="glass rounded-2xl overflow-hidden group">
-          <summary className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-white/[0.015] transition-colors list-none">
-            <svg
-              className="w-4 h-4 text-white/30 transition-transform group-open:rotate-90"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9 5l7 7-7 7"
-              />
-            </svg>
-            <span className="text-sm font-medium text-white/50">
-              Research Process
-            </span>
-            <span className="text-[10px] text-white/20 font-mono">
-              {activeSteps.length} steps
-            </span>
-
-            {/* Mini phase dots */}
-            <div className="flex items-center gap-0.5 ml-auto mr-2">
-              {state.steps
-                .filter((s) => s.id !== "complete")
-                .map((step) => (
-                  <div
-                    key={step.id}
-                    className="w-2 h-2 rounded-full bg-emerald-400/60"
-                  />
+        {/* Two-column layout: main process + sidebar sources */}
+        <div className="flex gap-4">
+          {/* Main content */}
+          <div className="flex-1 min-w-0 space-y-3">
+            {/* Collapsible research process */}
+            <details className="glass rounded-2xl overflow-hidden group">
+              <summary className="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-white/[0.015] transition-colors list-none">
+                <svg className="w-4 h-4 text-white/30 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+                <span className="text-sm font-medium text-white/50">Research Process</span>
+                <span className="text-[10px] text-white/20 font-mono">{activeSteps.length} steps</span>
+                <div className="flex items-center gap-0.5 ml-auto mr-2">
+                  {state.steps.filter(s => s.id !== "complete").map((step) => (
+                    <div key={step.id} className="w-2 h-2 rounded-full bg-emerald-400/60" />
+                  ))}
+                </div>
+              </summary>
+              <div className="border-t border-white/[0.04]">
+                {activeSteps.map((step) => (
+                  <div key={step.id}>
+                    <button
+                      onClick={() => setExpandedPhase(expandedPhase === step.id ? null : step.id)}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.015] transition-colors text-left border-b border-white/[0.04] last:border-b-0"
+                    >
+                      <span className="text-sm">{PHASE_ICONS[step.id] || "•"}</span>
+                      <span className="text-xs text-white/50 flex-1">{step.label}</span>
+                      <svg className={`w-3 h-3 text-white/15 transition-transform ${expandedPhase === step.id ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                    {expandedPhase === step.id && <PhaseContent step={step} state={state} />}
+                  </div>
                 ))}
-            </div>
-          </summary>
-
-          <div className="border-t border-white/[0.04]">
-            {activeSteps.map((step) => (
-              <div key={step.id}>
-                <button
-                  onClick={() =>
-                    setExpandedPhase(
-                      expandedPhase === step.id ? null : step.id
-                    )
-                  }
-                  className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.015] transition-colors text-left border-b border-white/[0.04] last:border-b-0"
-                >
-                  <span className="text-sm">
-                    {PHASE_ICONS[step.id] || "•"}
-                  </span>
-                  <span className="text-xs text-white/50 flex-1">
-                    {step.label}
-                  </span>
-                  <svg
-                    className={`w-3 h-3 text-white/15 transition-transform ${
-                      expandedPhase === step.id ? "rotate-180" : ""
-                    }`}
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M19 9l-7 7-7-7"
-                    />
-                  </svg>
-                </button>
-                {expandedPhase === step.id && (
-                  <PhaseContent step={step} state={state} />
-                )}
               </div>
-            ))}
+            </details>
           </div>
-        </details>
 
-        {/* Sources panel */}
+          {/* Sidebar: Sources */}
+          {state.allSources.length > 0 && (
+            <div className="hidden lg:block w-72 xl:w-80 flex-shrink-0">
+              <div className="glass rounded-2xl p-4 sticky top-20">
+                <SourcesPanel sources={state.allSources} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Sources for mobile (below main) */}
         {state.allSources.length > 0 && (
-          <SourcesPanel sources={state.allSources} />
+          <div className="lg:hidden mt-3 glass rounded-2xl p-4">
+            <SourcesPanel sources={state.allSources} />
+          </div>
         )}
       </div>
     );
   }
 
   /* =================================================================
-   * ACTIVE RESEARCH LAYOUT
+   * ACTIVE RESEARCH LAYOUT — sidebar with sources, progress, agents
    * ================================================================= */
 
   return (
@@ -1614,104 +1668,100 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
         <div className="glass rounded-2xl px-4 py-3 animate-fade-in border border-red-500/20 bg-red-500/[0.03]">
           <div className="flex items-start gap-3">
             <div className="w-8 h-8 rounded-xl bg-red-500/10 flex items-center justify-center flex-shrink-0">
-              <svg
-                className="w-4 h-4 text-red-400"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z"
-                />
+              <svg className="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
               </svg>
             </div>
             <div>
-              <div className="text-sm text-red-300 font-medium">
-                {state.errorInfo.error}
-              </div>
-              {state.errorInfo.hint && (
-                <div className="text-xs text-white/30 mt-1">
-                  {state.errorInfo.hint}
-                </div>
-              )}
+              <div className="text-sm text-red-300 font-medium">{state.errorInfo.error}</div>
+              {state.errorInfo.hint && <div className="text-xs text-white/30 mt-1">{state.errorInfo.hint}</div>}
             </div>
           </div>
         </div>
       )}
 
-      {/* Phase Timeline */}
-      <div className="glass rounded-2xl overflow-hidden">
-        {/* Mini phase dots at top */}
-        <div className="flex items-center gap-1 px-4 py-2.5 border-b border-white/[0.04]">
-          {state.steps
-            .filter((s) => s.id !== "complete")
-            .map((step, i) => (
-              <div key={step.id} className="flex items-center">
-                <div
-                  className={`w-2 h-2 rounded-full transition-all duration-500 ${
-                    step.status === "completed"
-                      ? "bg-emerald-400"
-                      : step.status === "active"
-                        ? "bg-violet-400 animate-pulse shadow-[0_0_8px_rgba(139,92,246,0.4)]"
-                        : "bg-white/10"
-                  }`}
-                />
-                {i <
-                  state.steps.filter((s) => s.id !== "complete").length - 1 && (
-                  <div
-                    className={`w-6 h-px mx-0.5 transition-all duration-500 ${
-                      step.status === "completed"
-                        ? "bg-emerald-400/30"
-                        : "bg-white/[0.06]"
-                    }`}
-                  />
-                )}
-              </div>
-            ))}
-          <span className="text-[10px] text-white/20 ml-auto font-mono tabular-nums">
-            {activeSteps.length}/{state.steps.length - 1}
-          </span>
-        </div>
-
-        {/* Expanded phases */}
-        {activeSteps.map((step, i) => (
-          <div
-            key={step.id}
-            className="animate-fade-in"
-            style={{ animationDelay: `${i * 30}ms` }}
-          >
-            <div className="w-full flex items-center gap-3 px-4 py-3 border-b border-white/[0.04] last:border-b-0">
-              <PhaseIcon status={step.status} />
-              <span
-                className={`text-sm font-medium flex-1 ${
-                  step.status === "active"
-                    ? "text-violet-300"
-                    : step.status === "completed"
-                      ? "text-white/60"
-                      : "text-white/30"
-                }`}
-              >
-                {step.label}
-              </span>
-              {step.status === "active" && (
-                <span className="text-[10px] text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full font-medium border border-violet-500/20 animate-pulse">
-                  In Progress
-                </span>
-              )}
+      {/* Two-column layout: phases + sidebar */}
+      <div className="flex gap-4">
+        {/* Main: Phase Timeline */}
+        <div className="flex-1 min-w-0">
+          <div className="glass rounded-2xl overflow-hidden">
+            {/* Mini phase dots at top */}
+            <div className="flex items-center gap-1 px-4 py-2.5 border-b border-white/[0.04]">
+              {state.steps.filter(s => s.id !== "complete").map((step, i) => (
+                <div key={step.id} className="flex items-center">
+                  <div className={`w-2 h-2 rounded-full transition-all duration-500 ${
+                    step.status === "completed" ? "bg-emerald-400" :
+                    step.status === "active" ? "bg-violet-400 animate-pulse shadow-[0_0_8px_rgba(139,92,246,0.4)]" :
+                    "bg-white/10"
+                  }`} />
+                  {i < state.steps.filter(s => s.id !== "complete").length - 1 && (
+                    <div className={`w-6 h-px mx-0.5 transition-all duration-500 ${
+                      step.status === "completed" ? "bg-emerald-400/30" : "bg-white/[0.06]"
+                    }`} />
+                  )}
+                </div>
+              ))}
+              <span className="text-[10px] text-white/20 ml-auto font-mono tabular-nums">{activeSteps.length}/{state.steps.length - 1}</span>
             </div>
 
-            {/* Phase content */}
-            <PhaseContent step={step} state={state} />
+            {/* Expanded phases */}
+            {activeSteps.map((step, i) => (
+              <div key={step.id} className="animate-fade-in" style={{ animationDelay: `${i * 30}ms` }}>
+                <div className="w-full flex items-center gap-3 px-4 py-3 border-b border-white/[0.04] last:border-b-0">
+                  <PhaseIcon status={step.status} />
+                  <span className={`text-sm font-medium flex-1 ${
+                    step.status === "active" ? "text-violet-300" :
+                    step.status === "completed" ? "text-white/60" : "text-white/30"
+                  }`}>
+                    {step.label}
+                  </span>
+                  {step.status === "active" && (
+                    <span className="text-[10px] text-violet-400 bg-violet-500/10 px-2 py-0.5 rounded-full font-medium border border-violet-500/20 animate-pulse">
+                      In Progress
+                    </span>
+                  )}
+                </div>
+                <PhaseContent step={step} state={state} />
+              </div>
+            ))}
           </div>
-        ))}
+        </div>
+
+        {/* Sidebar: Progress + Agents + Sources + Activity */}
+        <div className="hidden lg:flex flex-col gap-3 w-72 xl:w-80 flex-shrink-0">
+          {/* Progress panel */}
+          <div className="glass rounded-2xl p-4">
+            <SidebarProgress steps={state.steps} currentPhase={state.currentPhase} />
+          </div>
+
+          {/* Agents panel */}
+          {state.subagents.length > 0 && (
+            <div className="glass rounded-2xl p-4">
+              <SidebarAgents subagents={state.subagents} />
+            </div>
+          )}
+
+          {/* Sources panel */}
+          {state.allSources.length > 0 && (
+            <div className="glass rounded-2xl p-4">
+              <SourcesPanel sources={state.allSources} />
+            </div>
+          )}
+
+          {/* Activity feed */}
+          {state.subagents.some(a => a.searches.length > 0 || a.extractions.length > 0) && (
+            <div className="glass rounded-2xl p-4">
+              <ActivityFeed subagents={state.subagents} llmCalls={state.llmCalls} />
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Live sources panel */}
+      {/* Mobile: sources below */}
       {state.allSources.length > 0 && !state.isComplete && (
-        <SourcesPanel sources={state.allSources} />
+        <div className="lg:hidden glass rounded-2xl p-4">
+          <SourcesPanel sources={state.allSources} />
+        </div>
       )}
 
       {/* Active indicator */}
@@ -1723,14 +1773,8 @@ export function SearchDisplay({ events }: { events: ResearchEvent[] }) {
             <div className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-bounce [animation-delay:300ms]" />
           </div>
           <span className="text-xs text-white/25">
-            {state.subagents.filter(
-              (a) => !["pending", "complete"].includes(a.status)
-            ).length > 0
-              ? `${
-                  state.subagents.filter(
-                    (a) => !["pending", "complete"].includes(a.status)
-                  ).length
-                } agents researching...`
+            {state.subagents.filter(a => !["pending", "complete"].includes(a.status)).length > 0
+              ? `${state.subagents.filter(a => !["pending", "complete"].includes(a.status)).length} agents researching...`
               : PHASE_LABELS[state.currentPhase] || "Processing..."}
           </span>
         </div>

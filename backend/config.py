@@ -78,7 +78,7 @@ def load_config() -> AppConfig:
     cfg = AppConfig(
         default_provider=provider,
         default_model=model,
-        max_iterations=int(os.getenv("MAX_ITERATIONS", "2")),
+        max_iterations=int(os.getenv("MAX_ITERATIONS", "3")),
         quality_threshold=float(os.getenv("QUALITY_THRESHOLD", "0.7")),
     )
 

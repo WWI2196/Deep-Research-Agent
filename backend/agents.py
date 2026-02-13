@@ -58,6 +58,59 @@ def _clean_think_tags(content: str) -> str:
     return content
 
 
+def _strip_subtask_tags(text: str) -> str:
+    """Remove bracket tags like [subtask_id] from report headings and body."""
+    # Remove [word_word_word] patterns typically used as subtask IDs
+    text = re.sub(r'\[([a-z0-9_]+(?:_[a-z0-9_]+)+)\]\s*', '', text)
+    # Remove standalone bracket tags at start of lines
+    text = re.sub(r'^\s*\[[a-z0-9_]+\]\s*', '', text, flags=re.MULTILINE)
+    return text
+
+
+def _continue_if_truncated(report: str, user_query: str, context: str) -> str:
+    """Detect if a report was cut off mid-sentence and continue generation."""
+    if not report or len(report) < 500:
+        return report
+    
+    # Check for signs of truncation
+    last_100 = report[-100:].strip()
+    truncation_signs = [
+        not last_100.endswith(('.', '!', '?', ':', '\n', ')', ']', '```')),
+        last_100.endswith((',', 'and', 'the', 'of', 'in', 'to', 'a')),
+        report.count('## ') > 2 and ('## Sources' not in report and '## Bibliography' not in report and '## References' not in report and '## Open Questions' not in report and '## Conclusions' not in report),
+    ]
+    
+    if sum(truncation_signs) >= 1:
+        logger.info("Report appears truncated, requesting continuation...")
+        emit({"type": "subagent-step", "subtask_id": "synthesis", "subtask_title": "Report Synthesis", "step": "continuing", "message": "Report was truncated, continuing generation..."})
+        try:
+            continuation = _chat(
+                role="coordinator",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are continuing a research report that was cut off. "
+                            "Pick up EXACTLY where the text ends. Do not repeat any content. "
+                            "Do not add any preamble. Just continue writing from the cutoff point. "
+                            "Complete all remaining sections, especially Conclusions and Sources. "
+                            f"The report is about: {user_query}"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Continue this report from where it was cut off:\n\n...{report[-2000:]}",
+                    },
+                ],
+            )
+            if continuation and len(continuation.strip()) > 50:
+                return report + "\n\n" + continuation.strip()
+        except Exception as e:
+            logger.warning(f"Continuation failed: {e}")
+    
+    return report
+
+
 # ── unified LLM call ────────────────────────────────────────────────
 
 def _chat(
@@ -357,13 +410,13 @@ def run_subagent(
     evidence: List[Dict[str, Any]] = []
 
     # 2 — parallel search
-    search_queries = queries[: max(1, min(6, tool_budget))]
+    search_queries = queries[: max(1, min(10, tool_budget))]
     emit({"type": "subagent-step", "subtask_id": sid, "subtask_title": stitle, "step": "searching", "message": f"Searching {len(search_queries)} queries..."})
 
     def _search(q):
         try:
             emit({"type": "subagent-search", "subtask_id": sid, "query": q, "status": "started"})
-            result = firecrawl.search(q, limit=5)
+            result = firecrawl.search(q, limit=8)
             n = len(result.get("data", [])) if result else 0
             emit({"type": "subagent-search", "subtask_id": sid, "query": q, "status": "completed", "results_found": n})
             return result
@@ -437,9 +490,9 @@ def run_subagent(
                     "source": item.get("source", "search"),
                 })
 
-    top_urls = unique_urls[: min(8, tool_budget)]
+    top_urls = unique_urls[: min(12, tool_budget)]
     if not top_urls:
-        top_urls = [s.get("url") for s in filtered if s.get("url")][: min(8, tool_budget)]
+        top_urls = [s.get("url") for s in filtered if s.get("url")][: min(12, tool_budget)]
 
     emit({
         "type": "subagent-sources-scored", "subtask_id": sid, "subtask_title": stitle,
@@ -507,21 +560,26 @@ def run_subagent(
 @traceable(name="synthesize_report")
 def synthesize_report(user_query: str, research_plan: str, reports: List[str]) -> str:
     combined = "\n\n".join(reports)
-    max_chars = 60000
+    max_chars = 80000
     for attempt in range(3):
         try:
             truncated = combined[:max_chars] if len(combined) > max_chars else combined
-            return _chat(
+            result = _chat(
                 role="coordinator",
                 messages=[{
                     "role": "system",
                     "content": SYNTHESIS_SYSTEM.format(
                         user_query=user_query,
-                        research_plan=research_plan[:2000],
+                        research_plan=research_plan[:3000],
                         subagent_reports=truncated,
                     ),
                 }],
             )
+            # Check if report was cut off and continue if needed
+            result = _continue_if_truncated(result, user_query, truncated)
+            # Strip any remaining bracket tags like [task_id]
+            result = _strip_subtask_tags(result)
+            return result
         except Exception as e:
             lower = str(e).lower()
             if "400" in lower or "too long" in lower or "max" in lower:
@@ -533,14 +591,16 @@ def synthesize_report(user_query: str, research_plan: str, reports: List[str]) -
 
 @traceable(name="citation_agent")
 def add_citations(report: str, sources: List[Dict[str, Any]]) -> str:
+    # Strip subtask tags before citation pass
+    report = _strip_subtask_tags(report)
     sources_text = "\n".join(
         f"- {s.get('title', 'Source')} | {s.get('url')} | {s.get('description', '')}"
-        for s in sources[:40]
+        for s in sources[:50]
         if s.get("url")
     )
     try:
-        truncated = report[:50000] if len(report) > 50000 else report
-        return _chat(
+        truncated = report[:60000] if len(report) > 60000 else report
+        result = _chat(
             role="citation",
             messages=[{
                 "role": "system",
@@ -548,6 +608,11 @@ def add_citations(report: str, sources: List[Dict[str, Any]]) -> str:
             }],
             temperature=0.1,
         )
+        # Continue if truncated
+        result = _continue_if_truncated(result, "citation pass", "")
+        # Strip any remaining tags
+        result = _strip_subtask_tags(result)
+        return result
     except Exception as e:
         logger.warning(f"Citation agent failed: {e}")
         return report
