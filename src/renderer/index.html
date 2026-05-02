@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deep Research</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <!-- Title bar -->
+    <header class="titlebar">
+      <div class="titlebar-dots">
+        <span class="dot dot-red"></span>
+        <span class="dot dot-amber"></span>
+        <span class="dot dot-green"></span>
+      </div>
+      <span class="titlebar-title">Deep Research</span>
+      <nav class="titlebar-nav" id="nav">
+        <button class="nav-btn active" data-page="input">Home</button>
+        <button class="nav-btn" data-page="dashboard" style="display:none" id="nav-dashboard">Progress</button>
+        <button class="nav-btn" data-page="report" style="display:none" id="nav-report">Report</button>
+        <button class="nav-btn" data-page="history">History</button>
+        <button class="nav-btn" data-page="settings">Settings</button>
+      </nav>
+    </header>
+
+    <!-- Page: Input -->
+    <main id="page-input" class="page active">
+      <div class="input-hero">
+        <h1 class="input-title">探索任何主题的深度研究</h1>
+        <div class="input-box">
+          <textarea id="query-input" placeholder="输入你想研究的问题..." rows="3"></textarea>
+        </div>
+        <div class="input-options">
+          <div class="option-group">
+            <label>深度</label>
+            <div class="btn-group" id="depth-group">
+              <button class="btn-option" data-depth="1">1</button>
+              <button class="btn-option" data-depth="2">2</button>
+              <button class="btn-option active" data-depth="3">3</button>
+            </div>
+          </div>
+          <div class="option-group">
+            <label>模型</label>
+            <select id="model-select" class="select"></select>
+          </div>
+        </div>
+        <button id="btn-start" class="btn-primary">开始研究</button>
+        <div id="input-error" class="error-msg" style="display:none"></div>
+      </div>
+      <div class="recent-section">
+        <h3 class="section-title">最近研究</h3>
+        <div id="recent-list" class="recent-list"></div>
+      </div>
+    </main>
+
+    <!-- Page: Dashboard -->
+    <main id="page-dashboard" class="page">
+      <div class="dashboard-layout">
+        <aside class="sidebar-left" id="sidebar-left">
+          <div class="sidebar-panel" id="sources-panel"></div>
+        </aside>
+        <section class="center">
+          <div class="progress-bar-container" id="progress-bar"></div>
+          <div class="phase-timeline" id="phase-timeline"></div>
+          <div class="subagent-board" id="subagent-board"></div>
+        </section>
+        <aside class="sidebar-right" id="sidebar-right">
+          <div class="sidebar-panel" id="agents-panel"></div>
+        </aside>
+      </div>
+    </main>
+
+    <!-- Page: Report -->
+    <main id="page-report" class="page">
+      <div class="report-layout">
+        <aside class="sidebar-left" id="report-sidebar">
+          <div class="report-stats" id="report-stats"></div>
+          <div class="report-actions">
+            <button id="btn-export-md" class="btn-secondary">Export Markdown</button>
+            <button id="btn-copy" class="btn-secondary">Copy to Clipboard</button>
+            <button id="btn-new-research" class="btn-primary">New Research</button>
+          </div>
+        </aside>
+        <section class="center">
+          <div class="report-content markdown-body" id="report-content"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- Page: History -->
+    <main id="page-history" class="page">
+      <div class="history-container">
+        <h2 class="section-title">Research History</h2>
+        <div id="history-list"></div>
+      </div>
+    </main>
+
+    <!-- Page: Settings -->
+    <main id="page-settings" class="page">
+      <div class="settings-container">
+        <h2 class="section-title">Settings</h2>
+        <div class="settings-form" id="settings-form"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="js/utils/format.js"></script>
+  <script src="js/utils/markdown.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/components/input.js"></script>
+  <script src="js/components/sources.js"></script>
+  <script src="js/components/phases.js"></script>
+  <script src="js/components/subagents.js"></script>
+  <script src="js/components/dashboard.js"></script>
+  <script src="js/components/report.js"></script>
+  <script src="js/components/history.js"></script>
+  <script src="js/components/settings.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

@@ -5,44 +5,66 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Development commands
 
 ```bash
-# Backend
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python run.py                          # starts FastAPI at http://localhost:8000
+# Python (uv)
+uv sync                                    # install all deps + venv
+uv sync --group dev                        # include dev deps (pytest, ruff, mypy)
+uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787  # start server
 
-# Frontend
-cd frontend && npm install
-npm run dev                            # starts Next.js at http://localhost:3000
-npm run lint                           # ESLint
-npm run build                          # production build
+# Tests
+uv run pytest tests/ -v                    # all tests (160)
+uv run pytest tests/test_agents.py -v      # single test file
+
+# Lint & type check
+uv run ruff check src/                     # lint
+uv run mypy src/ --strict                  # type check (not yet passing)
+
+# Electron (install and run)
+npm install
+npm run dev                                # tsc + electron .
+
+# SearXNG (required for search)
+cd ~/searxng && docker compose up -d       # start search engine
+curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 ```
-
-No backend test suite exists. No type checker is configured for Python. The frontend has `npm run lint` (Next.js ESLint).
 
 ## Architecture
 
-**Pipeline**: A LangGraph `StateGraph` with 8 nodes executes a research query end-to-end. The graph is built in [backend/graph.py](backend/graph.py) per request. Flow: `init → plan → split → scale → subagents → reflection → (loop or proceed) → synthesize → cite → END`. Reflection can loop back to subagents when gaps are found, up to `MAX_ITERATIONS`.
+**Product**: Cross-platform desktop app (Electron + Python backend). Users `git clone`, configure `~/.deep-research/config.yaml`, start SearXNG, run `npm run dev`. Reference UI: Codex for Mac — dark, minimal, clean typography.
 
-**State**: The graph operates on `ResearchState` (TypedDict in [backend/models.py](backend/models.py)) which holds the query, plan, subtasks, subagent reports, sources, iteration count, and final cited report.
+**Directory layout**:
+- `src/backend/` — Python research engine (FastAPI + LangGraph + SQLite)
+- `src/main/` — Electron main process (TypeScript, window & subprocess management)
+- `src/renderer/` — Frontend UI (Vanilla JS, no framework)
+- `tests/` — pytest test suite (160 tests)
 
-**LLM routing** ([backend/config.py](backend/config.py)): `AppConfig` loads `LLM_PROVIDER`/`LLM_MODEL` from env with optional per-role overrides (`PLANNER_PROVIDER`, `SUBAGENT_MODEL`, etc.). Each of 8 roles can use a different provider+model. The abstract `LLMProvider` base ([backend/providers/base.py](backend/providers/base.py)) expects OpenAI-style message dicts and returns plain text. Four implementations: Gemini, OpenAI, Anthropic, and HuggingFace. The HuggingFace provider proxies multiple HF inference providers (novita, sambanova, auto) via `InferenceClient(provider=...)`.
+**Pipeline**: LangGraph `StateGraph` with 8 async nodes in [src/backend/graph.py](src/backend/graph.py). Flow: `init → plan → split → scale → subagents → reflection → (loop or proceed) → synthesize → cite → END`. Built and invoked per-request via `build_and_run_graph()`.
 
-**Two config files warning**: The root [config.py](config.py) defines `ModelConfig` classes with fallback chains per role using "novita"/"sambanova" providers — this is a standalone reference artifact, NOT imported by the backend. Runtime config lives in [backend/config.py](backend/config.py). The two are independent and may drift.
+**State**: `ResearchState` (TypedDict in [src/backend/models.py](src/backend/models.py)) — holds query, plan, subtasks, subagent reports, sources, iteration count, cited report, memory.
 
-**SSE streaming** ([backend/server.py](backend/server.py), [backend/events.py](backend/events.py)): A thread-safe event bus (`emit`/`add_listener`) decouples pipeline nodes (which run in executor threads) from the SSE generator. `_translate_event()` maps internal event types to SSE wire events consumed by the frontend.
+**LLM routing** ([src/backend/config.py](src/backend/config.py)): Priority chain: env var > `~/.deep-research/config.yaml` > built-in default. 8 roles (planner, splitter, scaler, subagent, evaluator, coordinator, reflection, citation) can each use a different provider+model. Config supports `${VAR}` env substitution. Six built-in providers: mimo, openai, anthropic, gemini, deepseek, openrouter. Two provider types: `OpenAICompatibleProvider` (openai type) and `AnthropicProvider` (anthropic type), both fully async with exponential backoff retry ([src/backend/providers/base.py](src/backend/providers/base.py)).
 
-**Parallelism model**: Subagents run concurrently via `asyncio.to_thread()` in [backend/graph.py:30](backend/graph.py). Each subagent internally uses `ThreadPoolExecutor` for parallel search queries and URL extraction. This creates two levels of concurrency.
+**Search** ([src/backend/search.py](src/backend/search.py)): SearXNG (self-hosted, 70+ engines aggregated) via JSON API at `http://127.0.0.1:8080`. No API key needed. Content extraction via trafilatura (free, pip-installable) — fetches page HTML and extracts clean markdown. No paid search dependencies.
 
-**Search layer** ([backend/search.py](backend/search.py)): Firecrawl primary → DuckDuckGo fallback (free, no API key). When Firecrawl fails with payment/auth errors, it's disabled for the session. `_normalise_search_response` handles both Pydantic v2 model responses and plain dicts.
+**Agents** ([src/backend/agents.py](src/backend/agents.py)): All LLM calls go through async `_chat(role, messages)` with per-role provider routing. Key behaviors:
+- `run_subagent`: 7-step flow — generate queries → SearXNG search → evaluate sources → LLM selects URLs for full-text → trafilatura extract → build evidence (FULL-TEXT / SNIPPET) → write report
+- `_continue_if_truncated`: Detects cut-off output via dangling connectives, requests continuation
+- `_refine_queries_if_needed`: Re-searches when avg quality < 0.5 and < 3 high-quality sources
+- `_enforce_source_diversity`: Caps 3 sources per domain
+- `batch_evaluate_sources`: Scores in batches of 20 via evaluator LLM role
 
-**Agents** ([backend/agents.py](backend/agents.py)): All LLM calls go through `_chat(role, messages)` which emits telemetry events and retries on transient failures (exponential backoff, max 3 attempts). Key behaviors:
-- `_continue_if_truncated`: Detects genuinely cut-off output by checking for dangling connectives ("and", "the", "of"...) at the end, then requests continuation up to 4 rounds. Avoids false positives from clean sentence endings.
-- `_refine_queries_if_needed`: When average source quality score < 0.5 and fewer than 3 high-quality sources, generates refined search queries.
-- `_enforce_source_diversity`: Caps 3 sources per domain for breadth.
-- `batch_evaluate_sources`: Scores sources in batches of 20 via the evaluator LLM role.
+**Persistence** ([src/backend/persistence.py](src/backend/persistence.py)): Local SQLite at `~/.deep-research/history.db`. Four tables: `runs`, `checkpoints`, `sources`, `subagent_reports`. Checkpoints written after every pipeline phase.
 
-**Persistence** ([backend/persistence.py](backend/persistence.py)): Best-effort Supabase writes for state checkpoints and artifacts (subagent reports, final report, cited report). Pipeline continues normally if Supabase is unreachable or unconfigured.
+**SSE streaming** ([src/backend/server.py](src/backend/server.py)): `POST /api/research/stream` returns SSE stream. Events flow through `asyncio.Queue`, drained in main loop. `_translate_event()` maps internal events to wire format consumed by frontend. All 8 REST endpoints covered by tests.
 
-**Frontend**: Next.js 15 + React 19 + Tailwind CSS 4. Single-page app at [frontend/app/page.tsx](frontend/app/page.tsx) with three components: `ResearchChat` (SSE client + model selector), `SearchDisplay` (three-column dashboard with sticky sidebars), `MarkdownRenderer` (react-markdown + remark-gfm). The SSE client connects directly to `NEXT_PUBLIC_BACKEND_URL` (bypasses Next.js rewrite proxy because it buffers streaming responses in dev mode). All non-streaming calls go through Next.js proxy at `/api/*`.
+**Parallelism**: Subagents run concurrently via `asyncio.gather`. Search and extract inside each subagent also use `asyncio.gather` (with `asyncio.to_thread` for sync I/O).
 
-**Supabase schema** ([supabase_schema.sql](supabase_schema.sql)): Three tables — `deep_research_runs` (upserted current state), `deep_research_checkpoints` (append-only phase history), `deep_research_artifacts` (reports and cited output).
+**Frontend** ([src/renderer/](src/renderer/)): Single-page app with 5 pages — input, dashboard, report, history, settings. Markdown rendered via CDN-loaded `marked.js`. State management via `STATE` object + event-driven derivation. Electron loads `index.html` directly, communicates with Python backend on localhost via fetch + EventSource.
+
+**Config file** ([config.yaml.example](config.yaml.example)): Template for `~/.deep-research/config.yaml`. Supports per-role model overrides, `${VAR}` env substitution, research default parameters. No search API keys needed — uses self-hosted SearXNG.
+
+## Key constraints
+
+- SearXNG must be running for search to work (`docker compose up -d` in `~/searxng/`)
+- Backend must start before Electron (`uv run uvicorn ...`)
+- All Python changes must maintain 160 passing tests
+- trafilatura is the only content extraction method — no paid alternatives

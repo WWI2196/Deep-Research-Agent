@@ -1,0 +1,44 @@
+# Deep Research Agent 配置
+# 复制为 ~/.deep-research/config.yaml 并修改
+
+# ── 在此填写你的 API Key ──────────────────────────────────────────
+providers:
+  mimo:
+    api_key: your-mimo-api-key-here
+
+# ── 其他内置 provider 参考 ─────────────────────────────────────────
+#   openai:     api_key: sk-...
+#   anthropic:  api_key: sk-ant-...
+#   gemini:     api_key: ...
+#   deepseek:   api_key: sk-...
+#   openrouter: api_key: sk-or-...
+#
+#   也可以自定义任意兼容 OpenAI API 的服务:
+#   my-custom:
+#     type: openai
+#     base_url: https://api.example.com/v1
+#     api_key: sk-xxx
+
+# ── 默认模型 ────────────────────────────────────────────────────────
+default:
+  provider: mimo
+  model: mimo-v2.5
+
+# ── 按角色分配模型 ──────────────────────────────────────────────────
+roles:
+  planner: { provider: mimo, model: mimo-v2.5-pro }
+  subagent: { provider: mimo, model: mimo-v2.5-pro }
+  coordinator: { provider: mimo, model: mimo-v2.5-pro }
+  reflection: { provider: mimo, model: mimo-v2.5-pro }
+
+# ── 搜索 ──────────────────────────────────────────────────────────
+#   使用自托管 SearXNG (http://127.0.0.1:8080)
+#   通过 SEARXNG_BASE 环境变量可自定义地址
+#   无需 API Key
+
+# ── 研究默认参数 ────────────────────────────────────────────────────
+research:
+  max_iterations: 3
+  quality_threshold: 0.7
+  max_sources_per_domain: 3
+  tool_calls_per_subagent: 15
