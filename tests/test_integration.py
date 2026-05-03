@@ -140,7 +140,7 @@ async def test_search_to_agent_integration():
     assert len(normalized) == 3
 
     # Batch evaluate
-    with patch("src.backend.agents._chat", new_callable=AsyncMock) as mock_chat:
+    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.return_value = json.dumps({
             "evaluations": [
                 {"id": 0, "score": 0.9, "reason": "Academic paper, highly relevant"},

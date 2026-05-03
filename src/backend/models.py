@@ -2,8 +2,7 @@
 
 from typing import Any, TypedDict
 
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel
 
 # ── Pydantic models for structured LLM output ──
 

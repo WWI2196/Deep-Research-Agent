@@ -7,7 +7,6 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import yaml
 from dotenv import load_dotenv
@@ -248,7 +247,7 @@ def save_config(cfg: AppConfig) -> None:
         yaml.safe_dump(yaml_cfg, f, default_flow_style=False, allow_unicode=True)
 
 
-_config: Optional[AppConfig] = None
+_config: AppConfig | None = None
 
 
 def get_config() -> AppConfig:

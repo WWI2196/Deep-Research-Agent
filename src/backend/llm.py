@@ -1,0 +1,78 @@
+"""Unified async LLM call routing with provider caching."""
+
+import asyncio
+import logging
+import time
+
+from .config import get_config
+from .helpers import clean_think_tags
+from .providers import get_provider
+
+logger = logging.getLogger(__name__)
+
+# ── provider cache with config-aware TTL ──────────────────────────────
+
+_provider_cache: dict[str, tuple[object, float]] = {}
+_PROVIDER_CACHE_TTL = 300  # 5 minutes
+
+
+def _get_or_create_provider(provider_name: str):
+    now = time.monotonic()
+    entry = _provider_cache.get(provider_name)
+    if entry is not None:
+        cached_provider, cached_at = entry
+        if now - cached_at < _PROVIDER_CACHE_TTL:
+            return cached_provider
+
+    app_cfg = get_config()
+    pc = app_cfg.providers.get(provider_name)
+    if not pc:
+        pc = app_cfg.providers.get(app_cfg.default_provider)
+    if not pc:
+        raise RuntimeError(f"No provider configured: '{provider_name}'")
+
+    p = get_provider(pc.type, pc.base_url, pc.api_key)
+    _provider_cache[provider_name] = (p, now)
+    return p
+
+
+def invalidate_provider_cache() -> None:
+    """Clear cached providers so next call picks up config changes."""
+    _provider_cache.clear()
+
+
+# ── unified async LLM call ────────────────────────────────────────────
+
+async def chat(
+    role: str,
+    messages: list[dict[str, str]],
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    max_retries: int = 3,
+) -> str:
+    role_cfg = get_config().get_role(role)
+    provider = _get_or_create_provider(role_cfg.provider)
+    temp = temperature if temperature is not None else role_cfg.temperature
+
+    for attempt in range(max_retries):
+        try:
+            result = await provider.chat(
+                model=role_cfg.model,
+                messages=messages,
+                temperature=temp,
+                max_tokens=max_tokens,
+            )
+            result = clean_think_tags(result)
+            return result
+        except Exception as exc:
+            err = str(exc).lower()
+            if any(c in err for c in ["401", "403", "invalid"]):
+                raise
+            if attempt < max_retries - 1:
+                delay = 2.0 * (2**attempt)
+                logger.warning("LLM call [%s] attempt %d failed: %s. Retrying in %.1fs", role, attempt + 1, exc, delay)
+                await asyncio.sleep(delay)
+                continue
+            raise
+
+    raise RuntimeError(f"LLM call exhausted retries for [{role}]")

@@ -1,6 +1,5 @@
 """LangGraph state graph for the research pipeline — all async."""
 
-import asyncio
 import json
 import logging
 import uuid
@@ -8,20 +7,21 @@ from typing import Any
 
 from langgraph.graph import END, StateGraph
 
-from .agents import (
-    add_citations,
-    compute_scaling,
-    generate_research_plan,
-    run_subagents_parallel,
-    split_into_subtasks,
-    synthesize_report,
-    _chat,
-    _extract_json,
-)
 from .config import get_config
+from .helpers import extract_json
+from .llm import chat
 from .models import ResearchState
-from .persistence import persist_checkpoint, persist_run, update_run_status
+from .persistence import (
+    persist_checkpoint,
+    persist_run,
+    persist_source,
+    persist_subagent_report,
+    update_run_status,  # noqa: F401 — used by server.py tests
+)
+from .planning import compute_scaling, generate_research_plan, split_into_subtasks
 from .prompts import REFLECTION
+from .subagent import run_subagents_parallel
+from .synthesis import add_citations, synthesize_report
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +168,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
         s["sources"] = unique
         s["iteration_count"] = iteration + 1
 
-        # Emit per-subagent events
+        # Emit per-subagent events & persist
         for item in results.get("raw", []):
             await _emit({"type": "subagent-complete",
                    "subtask_id": item["subtask_id"],
@@ -176,6 +176,23 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
                    "report_length": len(item.get("report", "")),
                    "sources_count": len(item.get("sources", [])),
                    "evidence_count": item.get("evidence_count", 0)})
+
+            # Persist subagent report
+            await persist_subagent_report(
+                s["run_id"], item["subtask_id"], item.get("report", ""),
+                sources_count=len(item.get("sources", [])),
+                evidence_count=item.get("evidence_count", 0),
+            )
+
+            # Persist sources for this subagent
+            for src in item.get("sources", []):
+                await persist_source(
+                    s["run_id"], src.get("url", ""),
+                    title=src.get("title", ""),
+                    quality_score=src.get("quality_score", 0),
+                    domain=src.get("domain", ""),
+                    subtask_id=item["subtask_id"],
+                )
 
         pct = _progress(completed_weight, PHASE_WEIGHTS["subagents"])
         await _emit({"type": "progress", "phase": "subagents", "percent": pct})
@@ -202,7 +219,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
 
         try:
             truncated = "\n\n".join(r[:3000] for r in reports)
-            response = await _chat(
+            response = await chat(
                 role="reflection",
                 messages=[{
                     "role": "user",
@@ -220,7 +237,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
                 payload = json.loads(content)
                 new_subtasks = payload.get("subtasks", [])
             except json.JSONDecodeError:
-                ext = _extract_json(content)
+                ext = extract_json(content)
                 if ext:
                     try:
                         new_subtasks = json.loads(ext).get("subtasks", [])

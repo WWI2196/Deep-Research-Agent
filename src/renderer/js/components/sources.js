@@ -4,12 +4,12 @@ function renderSourcesPanel() {
   const container = document.getElementById('sources-panel');
   if (!container) return;
 
-  if (STATE.allSources.length === 0) {
+  if (store.get('allSources').length === 0) {
     container.innerHTML = '<div class="sources-header">Sources</div><div style="font-size:11px;color:var(--text-tertiary)">Waiting for sources...</div>';
     return;
   }
 
-  const sorted = [...STATE.allSources].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const sorted = [...store.get('allSources')].sort((a, b) => (b.score || 0) - (a.score || 0));
 
   // Domain counts
   const domainCounts = {};
@@ -50,7 +50,7 @@ function renderAgentsPanel() {
   const container = document.getElementById('agents-panel');
   if (!container) return;
 
-  const agents = Object.values(STATE.subagents);
+  const agents = Object.values(store.get('subagents'));
   if (agents.length === 0) {
     container.innerHTML = '';
     return;

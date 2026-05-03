@@ -1,23 +1,23 @@
 // ── Report page ──────────────────────────────────────────────────
 
 function renderReportPage() {
-  const content = STATE.citedReport || STATE.reportDraft || '';
+  const content = store.get('citedReport') || store.get('reportDraft') || '';
   document.getElementById('report-content').innerHTML = renderMarkdown(content);
 
   // Stats
-  if (STATE.completionStats) {
-    const stats = STATE.completionStats;
+  if (store.get('completionStats')) {
+    const stats = store.get('completionStats');
     document.getElementById('report-stats').innerHTML = `
       <div class="stat"><span class="stat-label">Sources</span><span class="stat-value">${stats.total_sources || 0}</span></div>
       <div class="stat"><span class="stat-label">Reports</span><span class="stat-value">${stats.total_reports || 0}</span></div>
       <div class="stat"><span class="stat-label">Iterations</span><span class="stat-value">${stats.iterations || 0}</span></div>
-      <div class="stat"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(STATE.elapsed)}</span></div>
+      <div class="stat"><span class="stat-label">Duration</span><span class="stat-value">${formatDuration(store.get('elapsed'))}</span></div>
     `;
   }
 
   // Export buttons
   document.getElementById('btn-export-md').onclick = () => {
-    const text = STATE.citedReport || STATE.reportDraft || '';
+    const text = store.get('citedReport') || store.get('reportDraft') || '';
     const blob = new Blob([text], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -28,7 +28,7 @@ function renderReportPage() {
   };
 
   document.getElementById('btn-copy').onclick = () => {
-    const text = STATE.citedReport || STATE.reportDraft || '';
+    const text = store.get('citedReport') || store.get('reportDraft') || '';
     navigator.clipboard.writeText(text);
   };
 
@@ -41,7 +41,7 @@ function renderReportPage() {
 }
 
 function renderSourcesInReportSidebar() {
-  const sorted = [...STATE.allSources].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const sorted = [...store.get('allSources')].sort((a, b) => (b.score || 0) - (a.score || 0));
   if (sorted.length === 0) return;
 
   const list = sorted.slice(0, 20).map(s => {
@@ -69,14 +69,14 @@ function renderSourcesInReportSidebar() {
 async function viewHistoryReport(runId) {
   try {
     const report = await fetchReport(runId);
-    STATE.citedReport = report.content || '';
-    STATE.reportDraft = '';
-    STATE.completionStats = {
+    store.set('citedReport', report.content || '');
+    store.set('reportDraft', '');
+    store.set('completionStats', {
       total_sources: report.total_sources || 0,
       total_reports: report.total_reports || 0,
       iterations: report.iterations || 0,
-    };
-    STATE.allSources = [];
+    });
+    store.set('allSources', []);
     navigateTo('report');
     renderReportPage();
   } catch {

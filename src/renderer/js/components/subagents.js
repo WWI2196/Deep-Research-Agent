@@ -4,7 +4,7 @@ function renderSubagentBoard() {
   const container = document.getElementById('subagent-board');
   if (!container) return;
 
-  const agents = Object.values(STATE.subagents);
+  const agents = Object.values(store.get('subagents'));
   if (agents.length === 0) {
     container.innerHTML = '';
     return;

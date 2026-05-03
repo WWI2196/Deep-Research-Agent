@@ -2,7 +2,21 @@
 
 let currentPage = 'input';
 
+// Per-page cleanup functions
+const _pageCleanups = {};
+
+function onPageCleanup(page, fn) {
+  const prev = _pageCleanups[page];
+  _pageCleanups[page] = prev ? () => { prev(); fn(); } : fn;
+}
+
 function navigateTo(page) {
+  // Destroy current page
+  if (_pageCleanups[currentPage]) {
+    _pageCleanups[currentPage]();
+    delete _pageCleanups[currentPage];
+  }
+
   currentPage = page;
 
   // Update pages
@@ -36,8 +50,7 @@ document.getElementById('nav').addEventListener('click', (e) => {
   const btn = e.target.closest('.nav-btn[data-page]');
   if (!btn) return;
   const page = btn.dataset.page;
-  if (page === 'dashboard' && !STATE.running && !STATE.complete) {
-    // Don't navigate to empty dashboard
+  if (page === 'dashboard' && !store.get('running') && !store.get('complete')) {
     return;
   }
   navigateTo(page);

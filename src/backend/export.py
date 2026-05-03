@@ -2,10 +2,9 @@
 
 import os
 from pathlib import Path
-from typing import Optional
 
 
-def export_markdown(content: str, output_path: Optional[str] = None) -> str:
+def export_markdown(content: str, output_path: str | None = None) -> str:
     """Save report as markdown file. Returns the file path."""
     if output_path:
         path = Path(output_path)

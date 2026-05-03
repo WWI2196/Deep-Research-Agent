@@ -13,9 +13,11 @@ def mock_deps():
          patch("src.backend.graph.run_subagents_parallel", new_callable=AsyncMock) as mock_subs, \
          patch("src.backend.graph.synthesize_report", new_callable=AsyncMock) as mock_synth, \
          patch("src.backend.graph.add_citations", new_callable=AsyncMock) as mock_cite, \
-         patch("src.backend.graph._chat", new_callable=AsyncMock) as mock_chat, \
+         patch("src.backend.graph.chat", new_callable=AsyncMock) as mock_chat, \
          patch("src.backend.graph.persist_run", new_callable=AsyncMock) as mock_persist_run, \
          patch("src.backend.graph.persist_checkpoint", new_callable=AsyncMock) as mock_persist_ckpt, \
+         patch("src.backend.graph.persist_source", new_callable=AsyncMock) as mock_persist_src, \
+         patch("src.backend.graph.persist_subagent_report", new_callable=AsyncMock) as mock_persist_rpt, \
          patch("src.backend.graph.update_run_status", new_callable=AsyncMock) as mock_update:
 
         # Default config

@@ -2,41 +2,49 @@
 
 let elapsedTimer = null;
 
+// Clean up timer when navigating away from dashboard
+onPageCleanup('dashboard', () => {
+  if (elapsedTimer) {
+    clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+});
+
 function handleResearchEvent(evt) {
   const e = evt;
 
   if (e.type === 'phase-update') {
-    STATE.currentPhase = e.phase;
+    store.set('currentPhase', e.phase);
   }
   if (e.type === 'plan-generated') {
-    STATE.planPreview = e.message || e.plan_preview || '';
+    store.set('planPreview', e.message || e.plan_preview || '');
   }
   if (e.type === 'subtasks-created') {
-    STATE.subtaskList = e.subtasks || [];
+    store.set('subtaskList', e.subtasks || []);
   }
   if (e.type === 'scaling-computed') {
-    STATE.scalingInfo = e.scaling || e;
+    store.set('scalingInfo', e.scaling || e);
   }
   if (e.type === 'progress') {
-    STATE.progressPercent = e.percent || 0;
+    store.set('progressPercent', e.percent || 0);
   }
 
   // Subagent events
   if (e.type === 'subagents-launch') {
     const iter = e.iteration || 1;
-    (e.agent_details || []).forEach(a => ensureAgent(a.id, a.title, a.description, iter));
+    (e.agent_details || []).forEach(a => store.ensureAgent(a.id, a.title, a.description, iter));
   }
   if (e.type === 'subagent-step') {
-    const sa = ensureAgent(e.subtask_id, e.subtask_title, '');
+    const sa = store.ensureAgent(e.subtask_id, e.subtask_title, '');
     sa.status = e.step;
     if (e.evidence_count !== undefined) sa.evidenceCount = e.evidence_count;
   }
   if (e.type === 'subagent-queries') {
-    const sa = ensureAgent(e.subtask_id, e.subtask_title, '');
+    const sa = store.ensureAgent(e.subtask_id, e.subtask_title, '');
     (e.queries || []).forEach(q => { if (!sa.queries.includes(q)) sa.queries.push(q); });
   }
   if (e.type === 'subagent-search') {
-    const sa = ensureAgent(e.subtask_id, '', '');
+    const sa = store.ensureAgent(e.subtask_id, '', '');
     const existing = sa.searches.find(s => s.query === e.query);
     if (existing) {
       existing.status = e.status;
@@ -46,20 +54,20 @@ function handleResearchEvent(evt) {
     }
   }
   if (e.type === 'subagent-sources-scored') {
-    const sa = ensureAgent(e.subtask_id, e.subtask_title, '');
+    const sa = store.ensureAgent(e.subtask_id, e.subtask_title, '');
     (e.top_scores || []).forEach(s => {
-      addSource({ url: s.url, title: s.title, score: s.score, subtask: e.subtask_title || '' });
+      store.addSource({ url: s.url, title: s.title, score: s.score, subtask: e.subtask_title || '' });
       if (!sa.sources.find(x => x.url === s.url)) sa.sources.push({ url: s.url, title: s.title, score: s.score });
     });
   }
   if (e.type === 'subagent-extract') {
-    const sa = ensureAgent(e.subtask_id, '', '');
+    const sa = store.ensureAgent(e.subtask_id, '', '');
     const existing = sa.extractions.find(x => x.url === e.url);
     if (existing) existing.status = e.status;
     else sa.extractions.push({ url: e.url, status: e.status });
   }
   if (e.type === 'subagent-complete') {
-    const sa = ensureAgent(e.subtask_id, e.subtask_title, '');
+    const sa = store.ensureAgent(e.subtask_id, e.subtask_title, '');
     sa.status = 'complete';
     sa.reportLength = e.report_length || 0;
     sa.evidenceCount = e.evidence_count || 0;
@@ -68,9 +76,12 @@ function handleResearchEvent(evt) {
   // LLM calls
   if (e.type === 'llm-call') {
     if (e.status === 'started') {
-      STATE.llmCalls.push({ model: e.model, provider: e.provider, role: e.role, status: 'started', attempt: e.attempt || 1, timestamp: Date.now() });
+      const calls = store.get('llmCalls');
+      calls.push({ model: e.model, provider: e.provider, role: e.role, status: 'started', attempt: e.attempt || 1, timestamp: Date.now() });
+      store.set('llmCalls', calls);
     } else {
-      const prev = [...STATE.llmCalls].reverse().find(c => c.role === e.role && c.status === 'started');
+      const calls = store.get('llmCalls');
+      const prev = [...calls].reverse().find(c => c.role === e.role && c.status === 'started');
       if (prev) {
         prev.status = e.status;
         prev.error = e.error;
@@ -81,44 +92,49 @@ function handleResearchEvent(evt) {
 
   // Reflection
   if (e.type === 'reflection-decision') {
-    STATE.reflectionInfo = {
+    store.set('reflectionInfo', {
       decision: e.decision || (e.research_complete ? 'research-complete' : 'gaps-found'),
       new_subtasks: e.new_subtasks || [],
       iteration: e.iteration || 0,
       total_reports: e.total_reports,
       total_sources: e.total_sources,
-    };
+    });
   }
 
   // Report
   if (e.type === 'report-draft') {
-    STATE.reportDraft = e.content || '';
+    store.set('reportDraft', e.content || '');
   }
 
   // Final
   if (e.type === 'final-result') {
-    STATE.citedReport = e.content || '';
+    store.set('citedReport', e.content || '');
   }
 
   if (e.type === 'warning') {
-    STATE.warnings.push(`[${e.phase}] ${e.message}`);
+    const warnings = store.get('warnings');
+    warnings.push(`[${e.phase}] ${e.message}`);
+    store.set('warnings', warnings);
   }
 
   if (e.type === 'error') {
-    STATE.error = { error: e.error, hint: e.hint, phase: e.phase };
+    store.set('error', { error: e.error, hint: e.hint, phase: e.phase });
   }
 
   if (e.type === 'complete') {
-    STATE.complete = true;
-    STATE.progressPercent = 100;
-    STATE.completionStats = {
+    store.set('complete', true);
+    store.set('progressPercent', 100);
+    store.set('completionStats', {
       total_sources: e.total_sources,
       total_reports: e.total_reports,
       iterations: e.iterations,
       provider: e.provider,
       model: e.model,
-    };
-    if (elapsedTimer) clearInterval(elapsedTimer);
+    });
+    if (elapsedTimer) {
+      clearInterval(elapsedTimer);
+      elapsedTimer = null;
+    }
   }
 
   // Update UI
@@ -126,16 +142,16 @@ function handleResearchEvent(evt) {
 }
 
 function handleResearchError(err) {
-  STATE.error = { error: err.message, hint: '', phase: 'connection' };
-  STATE.running = false;
+  store.set('error', { error: err.message, hint: '', phase: 'connection' });
+  store.set('running', false);
   document.getElementById('btn-start').disabled = false;
   updateDashboardUI();
 }
 
 function handleResearchDone() {
-  STATE.running = false;
+  store.set('running', false);
   document.getElementById('btn-start').disabled = false;
-  if (STATE.complete) {
+  if (store.get('complete')) {
     navigateTo('report');
     renderReportPage();
   }
@@ -143,7 +159,7 @@ function handleResearchDone() {
 }
 
 function updateDashboardUI() {
-  STATE.elapsed = Date.now() - STATE.startTime;
+  store.set('elapsed', Date.now() - store.get('startTime'));
 
   renderProgressBar();
   renderPhaseTimeline();
@@ -156,11 +172,11 @@ function updateDashboardUI() {
 function startElapsedTimer() {
   if (elapsedTimer) return;
   elapsedTimer = setInterval(() => {
-    if (STATE.running || !STATE.complete) {
-      STATE.elapsed = Date.now() - STATE.startTime;
+    if (store.get('running') || !store.get('complete')) {
+      store.set('elapsed', Date.now() - store.get('startTime'));
       updateDashboardUI();
     }
-    if (STATE.complete && elapsedTimer) {
+    if (store.get('complete') && elapsedTimer) {
       clearInterval(elapsedTimer);
       elapsedTimer = null;
     }
@@ -170,6 +186,6 @@ function startElapsedTimer() {
 // Override handleResearchEvent to start timer
 const _originalHandle = handleResearchEvent;
 handleResearchEvent = function(evt) {
-  if (!elapsedTimer && !STATE.complete) startElapsedTimer();
+  if (!elapsedTimer && !store.get('complete')) startElapsedTimer();
   _originalHandle(evt);
 };

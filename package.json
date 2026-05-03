@@ -3,7 +3,14 @@
   "version": "1.0.0",
   "description": "Deep research agent with FastAPI backend and browser frontend",
   "private": true,
+  "type": "module",
   "scripts": {
-    "start": "uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787"
+    "start": "uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "vitest": "^4.1.5"
   }
 }

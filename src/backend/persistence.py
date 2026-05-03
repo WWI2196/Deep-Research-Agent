@@ -1,5 +1,9 @@
-"""SQLite persistence — research runs, checkpoints, sources, subagent reports."""
+"""SQLite persistence — research runs, checkpoints, sources, subagent reports.
 
+All database I/O runs via asyncio.to_thread to avoid blocking the event loop.
+"""
+
+import asyncio
 import json
 import sqlite3
 import time
@@ -15,6 +19,33 @@ def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _write_sync(op) -> None:
+    """Run a write operation on a fresh connection with commit+close."""
+    conn = _get_conn()
+    try:
+        op(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _read_sync(op):
+    """Run a read operation on a fresh connection, returning the result."""
+    conn = _get_conn()
+    try:
+        return op(conn)
+    finally:
+        conn.close()
+
+
+async def _write_async(op) -> None:
+    await asyncio.to_thread(_write_sync, op)
+
+
+async def _read_async(op):
+    return await asyncio.to_thread(_read_sync, op)
 
 
 def init_db() -> None:
@@ -72,13 +103,10 @@ def init_db() -> None:
 
 
 async def persist_run(run_id: str, query: str, provider: str, model: str) -> None:
-    conn = _get_conn()
-    conn.execute(
+    await _write_async(lambda conn: conn.execute(
         "INSERT OR REPLACE INTO runs (run_id, query, status, provider, model, started_at) VALUES (?, ?, 'running', ?, ?, ?)",
         (run_id, query, provider, model, int(time.time())),
-    )
-    conn.commit()
-    conn.close()
+    ))
 
 
 async def update_run_status(
@@ -89,17 +117,13 @@ async def update_run_status(
     iterations: int = 0,
     report_path: str = "",
 ) -> None:
-    conn = _get_conn()
-    conn.execute(
+    await _write_async(lambda conn: conn.execute(
         "UPDATE runs SET status=?, total_sources=?, total_reports=?, iterations=?, completed_at=?, report_path=? WHERE run_id=?",
         (status, total_sources, total_reports, iterations, int(time.time()), report_path, run_id),
-    )
-    conn.commit()
-    conn.close()
+    ))
 
 
 async def persist_checkpoint(run_id: str, phase: str, state: dict[str, Any]) -> None:
-    conn = _get_conn()
     serializable = {}
     for k, v in state.items():
         try:
@@ -108,53 +132,49 @@ async def persist_checkpoint(run_id: str, phase: str, state: dict[str, Any]) -> 
         except (TypeError, ValueError):
             serializable[k] = str(v)
 
-    conn.execute(
+    await _write_async(lambda conn: conn.execute(
         "INSERT INTO checkpoints (run_id, phase, state, created_at) VALUES (?, ?, ?, ?)",
         (run_id, phase, json.dumps(serializable), int(time.time())),
-    )
-    conn.commit()
-    conn.close()
+    ))
 
 
 async def persist_source(run_id: str, url: str, title: str = "", quality_score: float = 0.0, domain: str = "", subtask_id: str = "") -> None:
-    conn = _get_conn()
-    conn.execute(
+    await _write_async(lambda conn: conn.execute(
         "INSERT INTO sources (run_id, url, title, quality_score, domain, subtask_id) VALUES (?, ?, ?, ?, ?, ?)",
         (run_id, url, title, quality_score, domain, subtask_id),
-    )
-    conn.commit()
-    conn.close()
+    ))
 
 
 async def persist_subagent_report(run_id: str, subtask_id: str, content: str, sources_count: int = 0, evidence_count: int = 0) -> None:
-    conn = _get_conn()
-    conn.execute(
+    await _write_async(lambda conn: conn.execute(
         "INSERT INTO subagent_reports (run_id, subtask_id, content, sources_count, evidence_count, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         (run_id, subtask_id, content, sources_count, evidence_count, int(time.time())),
-    )
-    conn.commit()
-    conn.close()
+    ))
 
 
 async def delete_run(run_id: str) -> bool:
-    conn = _get_conn()
-    row = conn.execute("SELECT report_path FROM runs WHERE run_id=?", (run_id,)).fetchone()
-    report_path = row["report_path"] if row else None
+    report_path: str | None = None
+    deleted: bool = False
 
-    conn.execute("DELETE FROM checkpoints WHERE run_id=?", (run_id,))
-    conn.execute("DELETE FROM sources WHERE run_id=?", (run_id,))
-    conn.execute("DELETE FROM subagent_reports WHERE run_id=?", (run_id,))
-    cursor = conn.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
-    conn.commit()
-    conn.close()
+    def _delete(conn):
+        nonlocal report_path, deleted
+        row = conn.execute("SELECT report_path FROM runs WHERE run_id=?", (run_id,)).fetchone()
+        report_path = row["report_path"] if row else None
+        conn.execute("DELETE FROM checkpoints WHERE run_id=?", (run_id,))
+        conn.execute("DELETE FROM sources WHERE run_id=?", (run_id,))
+        conn.execute("DELETE FROM subagent_reports WHERE run_id=?", (run_id,))
+        cursor = conn.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
+        deleted = cursor.rowcount > 0
+
+    await _write_async(_delete)
 
     if report_path:
         try:
-            Path(report_path).unlink(missing_ok=True)
+            await asyncio.to_thread(Path(report_path).unlink, missing_ok=True)
         except OSError:
             pass
 
-    return cursor.rowcount > 0
+    return deleted
 
 
 def get_run_history(limit: int = 20) -> list[dict[str, Any]]:
