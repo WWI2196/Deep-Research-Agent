@@ -136,6 +136,27 @@ async def persist_subagent_report(run_id: str, subtask_id: str, content: str, so
     conn.close()
 
 
+async def delete_run(run_id: str) -> bool:
+    conn = _get_conn()
+    row = conn.execute("SELECT report_path FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    report_path = row["report_path"] if row else None
+
+    conn.execute("DELETE FROM checkpoints WHERE run_id=?", (run_id,))
+    conn.execute("DELETE FROM sources WHERE run_id=?", (run_id,))
+    conn.execute("DELETE FROM subagent_reports WHERE run_id=?", (run_id,))
+    cursor = conn.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
+    conn.commit()
+    conn.close()
+
+    if report_path:
+        try:
+            Path(report_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    return cursor.rowcount > 0
+
+
 def get_run_history(limit: int = 20) -> list[dict[str, Any]]:
     conn = _get_conn()
     rows = conn.execute(

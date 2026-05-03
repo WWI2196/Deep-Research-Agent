@@ -71,6 +71,15 @@ async function fetchHistory() {
   return apiGet('/api/research/history');
 }
 
+async function deleteHistory(runId) {
+  const res = await fetch(`${BASE()}/api/research/${runId}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 async function fetchConfig() {
   return apiGet('/api/config');
 }

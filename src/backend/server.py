@@ -15,7 +15,7 @@ from .config import get_config, reload_config, save_config
 from .export import export_markdown
 from .graph import build_and_run_graph
 from .models import ConfigUpdateRequest, ResearchRequest, ResearchResponse
-from .persistence import get_report_content, get_run_history, get_run_report, init_db, update_run_status
+from .persistence import delete_run, get_report_content, get_run_history, get_run_report, init_db, update_run_status
 
 load_dotenv()
 
@@ -184,6 +184,14 @@ async def cancel_research(run_id: str):
 @app.get("/api/research/history")
 async def history(limit: int = 20):
     return {"history": get_run_history(limit)}
+
+
+@app.delete("/api/research/{run_id}")
+async def delete_research(run_id: str):
+    deleted = await delete_run(run_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Research run not found")
+    return {"status": "deleted", "run_id": run_id}
 
 
 @app.get("/api/research/{run_id}/report")
