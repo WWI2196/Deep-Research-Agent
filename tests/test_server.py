@@ -169,7 +169,8 @@ def test_list_models(client):
 
 def test_sse_stream_basic(client):
     """Verify SSE stream starts and returns data: formatted events."""
-    with patch("src.backend.server.build_and_run_graph", new_callable=AsyncMock) as mock_graph:
+    with patch("src.backend.server.build_and_run_graph", new_callable=AsyncMock) as mock_graph, \
+         patch("src.backend.server.export_markdown", return_value="/tmp/report.md"):
         mock_graph.return_value = {
             "run_id": "test-run-123",
             "user_query": "test query",
@@ -197,7 +198,8 @@ def test_sse_stream_basic(client):
 
 
 def test_sse_stream_has_init_event(client):
-    with patch("src.backend.server.build_and_run_graph", new_callable=AsyncMock) as mock_graph:
+    with patch("src.backend.server.build_and_run_graph", new_callable=AsyncMock) as mock_graph, \
+         patch("src.backend.server.export_markdown", return_value="/tmp/report.md"):
         mock_graph.return_value = {
             "run_id": "test-run",
             "user_query": "test",
@@ -225,7 +227,8 @@ def test_sse_stream_has_init_event(client):
 
 
 def test_sse_stream_passes_max_iterations(client):
-    with patch("src.backend.server.build_and_run_graph", new_callable=AsyncMock) as mock_graph:
+    with patch("src.backend.server.build_and_run_graph", new_callable=AsyncMock) as mock_graph, \
+         patch("src.backend.server.export_markdown", return_value="/tmp/report.md"):
         mock_graph.return_value = {
             "run_id": "test-run",
             "user_query": "test",
