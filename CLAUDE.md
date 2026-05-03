@@ -18,10 +18,6 @@ uv run pytest tests/test_agents.py -v      # single test file
 uv run ruff check src/                     # lint
 uv run mypy src/ --strict                  # type check (not yet passing)
 
-# Electron (install and run)
-npm install
-npm run dev                                # tsc + electron .
-
 # SearXNG (required for search)
 cd ~/searxng && docker compose up -d       # start search engine
 curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
@@ -29,12 +25,11 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 
 ## Architecture
 
-**Product**: Cross-platform desktop app (Electron + Python backend). Users `git clone`, configure `~/.deep-research/config.yaml`, start SearXNG, run `npm run dev`. Reference UI: Codex for Mac — dark, minimal, clean typography.
+**Product**: Web app (Python FastAPI backend + browser frontend). Users `git clone`, configure `~/.deep-research/config.yaml`, start SearXNG, run the server, open browser. Reference UI: Codex for Mac — dark, minimal, clean typography.
 
 **Directory layout**:
-- `src/backend/` — Python research engine (FastAPI + LangGraph + SQLite)
-- `src/main/` — Electron main process (TypeScript, window & subprocess management)
-- `src/renderer/` — Frontend UI (Vanilla JS, no framework)
+- `src/backend/` — Python research engine (FastAPI + LangGraph + SQLite), also serves static frontend files
+- `src/renderer/` — Frontend UI (Vanilla JS, no framework), served as static files by FastAPI
 - `tests/` — pytest test suite (160 tests)
 
 **Pipeline**: LangGraph `StateGraph` with 8 async nodes in [src/backend/graph.py](src/backend/graph.py). Flow: `init → plan → split → scale → subagents → reflection → (loop or proceed) → synthesize → cite → END`. Built and invoked per-request via `build_and_run_graph()`.
@@ -58,13 +53,13 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 
 **Parallelism**: Subagents run concurrently via `asyncio.gather`. Search and extract inside each subagent also use `asyncio.gather` (with `asyncio.to_thread` for sync I/O).
 
-**Frontend** ([src/renderer/](src/renderer/)): Single-page app with 5 pages — input, dashboard, report, history, settings. Markdown rendered via CDN-loaded `marked.js`. State management via `STATE` object + event-driven derivation. Electron loads `index.html` directly, communicates with Python backend on localhost via fetch + EventSource.
+**Frontend** ([src/renderer/](src/renderer/)): Single-page app with 5 pages — input, dashboard, report, history, settings. Markdown rendered via CDN-loaded `marked.js`. State management via `STATE` object + event-driven derivation. Served as static files by FastAPI, communicates with backend via same-origin fetch + SSE.
 
 **Config file** ([config.yaml.example](config.yaml.example)): Template for `~/.deep-research/config.yaml`. Supports per-role model overrides, `${VAR}` env substitution, research default parameters. No search API keys needed — uses self-hosted SearXNG.
 
 ## Key constraints
 
 - SearXNG must be running for search to work (`docker compose up -d` in `~/searxng/`)
-- Backend must start before Electron (`uv run uvicorn ...`)
+- Start server with `uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787`, then open `http://127.0.0.1:8787` in browser
 - All Python changes must maintain 160 passing tests
 - trafilatura is the only content extraction method — no paid alternatives

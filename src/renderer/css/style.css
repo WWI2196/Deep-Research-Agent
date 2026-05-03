@@ -39,15 +39,9 @@ body {
   gap: 12px;
   padding: 0 16px;
   height: 44px;
-  -webkit-app-region: drag;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
-.titlebar-dots { display: flex; gap: 6px; padding-right: 8px; }
-.dot { width: 10px; height: 10px; border-radius: 50%; }
-.dot-red { background: #ff5f57; }
-.dot-amber { background: #febc2e; }
-.dot-green { background: #28c840; }
 .titlebar-title {
   font-size: 13px;
   font-weight: 600;
@@ -58,7 +52,6 @@ body {
   display: flex;
   gap: 4px;
   margin-left: auto;
-  -webkit-app-region: no-drag;
 }
 .nav-btn {
   background: none;

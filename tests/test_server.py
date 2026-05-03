@@ -33,12 +33,14 @@ def mock_persistence():
     with patch("src.backend.server.init_db") as mk_init, \
          patch("src.backend.server.update_run_status", new_callable=AsyncMock) as mk_update, \
          patch("src.backend.server.get_run_history", return_value=[]) as mk_hist, \
-         patch("src.backend.server.get_run_report", return_value=None) as mk_report:
+         patch("src.backend.server.get_run_report", return_value=None) as mk_report, \
+         patch("src.backend.server.get_report_content", return_value="") as mk_content:
         yield {
             "init_db": mk_init,
             "update_run_status": mk_update,
             "get_run_history": mk_hist,
             "get_run_report": mk_report,
+            "get_report_content": mk_content,
         }
 
 
@@ -113,9 +115,12 @@ def test_get_report_found(client, mock_persistence):
         "total_sources": 10,
     }
     mock_persistence["get_run_report"].return_value = mock_report
+    mock_persistence["get_report_content"].return_value = "report text"
     response = client.get("/api/research/test-run/report")
     assert response.status_code == 200
-    assert response.json() == mock_report
+    data = response.json()
+    assert data["run_id"] == "test-run"
+    assert data["content"] == "report text"
 
 
 # ── Config endpoints ───────────────────────────────────────────

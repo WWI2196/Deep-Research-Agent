@@ -10,7 +10,9 @@ build/
 *.tmp
 *.cache
 __pycache__/
+research-output/
 
 .DS_Store
 .vscode/
 .env.local
+.claude/settings.json

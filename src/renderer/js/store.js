@@ -108,7 +108,3 @@ function getPhaseSteps() {
   return steps;
 }
 
-// Make STATE accessible for window.__researchInProgress check
-Object.defineProperty(window, '__researchInProgress', {
-  get() { return STATE.running; }
-});

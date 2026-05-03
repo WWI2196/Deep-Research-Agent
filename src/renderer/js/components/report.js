@@ -66,7 +66,22 @@ function renderSourcesInReportSidebar() {
   sidebar.appendChild(div);
 }
 
-function viewHistoryReport(runId) {
-  // TODO: fetch report by run_id and show in report page
-  navigateTo('report');
+async function viewHistoryReport(runId) {
+  try {
+    const report = await fetchReport(runId);
+    STATE.citedReport = report.content || '';
+    STATE.reportDraft = '';
+    STATE.completionStats = {
+      total_sources: report.total_sources || 0,
+      total_reports: report.total_reports || 0,
+      iterations: report.iterations || 0,
+    };
+    STATE.allSources = [];
+    navigateTo('report');
+    renderReportPage();
+  } catch {
+    navigateTo('report');
+    document.getElementById('report-content').innerHTML =
+      '<p style="color:var(--text-tertiary)">Failed to load report.</p>';
+  }
 }

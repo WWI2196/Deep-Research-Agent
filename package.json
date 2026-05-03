@@ -1,16 +1,9 @@
 {
   "name": "deep-research-agent",
   "version": "1.0.0",
-  "description": "Cross-platform deep research desktop application",
-  "main": "dist/main/index.js",
+  "description": "Deep research agent with FastAPI backend and browser frontend",
+  "private": true,
   "scripts": {
-    "dev": "tsc -p tsconfig.json && electron .",
-    "build": "tsc -p tsconfig.json",
-    "start": "electron ."
-  },
-  "devDependencies": {
-    "electron": "^33.0.0",
-    "typescript": "^5.6.0",
-    "@types/node": "^22.0.0"
+    "start": "uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787"
   }
 }
