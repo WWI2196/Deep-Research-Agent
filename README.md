@@ -184,7 +184,7 @@ uv run pytest tests/ -v    # 160 tests
 | Module | Tests | Coverage |
 |--------|-------|----------|
 | config.py | 21 | ~90% |
-| search.py | 8 | ~85% |
+| search.py | 7 | ~85% |
 | agents.py | 60 | ~80% |
 | graph.py | 10 | ~85% |
 | server.py | 17 | ~85% |
