@@ -1,7 +1,6 @@
 // ── Backend communication ────────────────────────────────────────
 
-const BACKEND_PORT = 8787; // Default, updated by Electron on startup
-const BASE = () => `http://127.0.0.1:${BACKEND_PORT}`;
+const BASE = () => '';
 
 async function apiGet(path) {
   const res = await fetch(`${BASE()}${path}`);
@@ -86,4 +85,8 @@ async function fetchHealth() {
 
 async function fetchModels() {
   return apiGet('/api/models');
+}
+
+async function fetchReport(runId) {
+  return apiGet(`/api/research/${runId}/report`);
 }

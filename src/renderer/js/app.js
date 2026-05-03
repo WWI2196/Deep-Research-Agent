@@ -47,14 +47,4 @@ document.getElementById('nav').addEventListener('click', (e) => {
 
 document.addEventListener('DOMContentLoaded', () => {
   initInputPage();
-
-  // Listen for port injected by Electron
-  if (window.process && window.process.argv) {
-    // Running in Electron
-    window.addEventListener('message', (event) => {
-      if (event.data && event.data.type === 'backend-port') {
-        window.BACKEND_PORT_WRITABLE = event.data.port;
-      }
-    });
-  }
 });

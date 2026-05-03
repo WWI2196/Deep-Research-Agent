@@ -43,9 +43,9 @@ async function initInputPage() {
   // Start button
   document.getElementById('btn-start').addEventListener('click', startResearch);
 
-  // Enter key
+  // Enter to submit, Shift+Enter for newline; ignore IME composition
   document.getElementById('query-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       startResearch();
     }

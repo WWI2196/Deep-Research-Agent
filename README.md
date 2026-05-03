@@ -1,6 +1,6 @@
 # Deep Research Agent
 
-A multi-agent deep research system that plans, searches, reads, reflects, and synthesizes high-quality cited reports. Desktop app powered by Electron + Python LangGraph backend.
+A multi-agent deep research system that plans, searches, reads, reflects, and synthesizes high-quality cited reports. Web app powered by Python LangGraph backend with browser frontend.
 
 ## Features
 
@@ -19,23 +19,17 @@ A multi-agent deep research system that plans, searches, reads, reflects, and sy
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Electron Shell                    │
-│  ┌──────────┐  ┌─────────────────────────────────┐  │
-│  │ main/    │  │ renderer/                        │  │
-│  │ python.ts │  │ Vanilla JS + marked.js           │  │
-│  │ index.ts  │  │ SSE events → dashboard UI        │  │
-│  └────┬─────┘  └──────────────┬──────────────────┘  │
-│       │ spawns                │ fetch + EventSource  │
-└───────┼───────────────────────┼──────────────────────┘
-        │                       │
-        ▼                       ▼
+Browser (http://127.0.0.1:8787)
+  │
+  │ fetch + SSE (same-origin)
+  ▼
 ┌───────────────────────────────────────────────────────┐
 │                Python Backend (:8787)                  │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐  │
 │  │ server.py│ │ graph.py │ │agents.py │ │search.py│  │
 │  │ FastAPI  │ │LangGraph │ │ 8 roles  │ │SearXNG  │  │
-│  │ SSE      │ │8 nodes   │ │_chat()   │ │trafilatura│ │
+│  │ Static   │ │8 nodes   │ │_chat()   │ │trafilatura│ │
+│  │ Files    │ │          │ │          │ │         │  │
 │  └──────────┘ └──────────┘ └──────────┘ └─────────┘  │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐              │
 │  │config.py │ │persist.py│ │prompts.py│              │
@@ -59,15 +53,14 @@ A multi-agent deep research system that plans, searches, reads, reflects, and sy
 
 - Python 3.12+ with [uv](https://docs.astral.sh/uv/)
 - Docker (for SearXNG)
-- Node.js (for Electron frontend)
 - An LLM API key (OpenRouter recommended, or any OpenAI-compatible provider)
+- A modern browser (Chrome, Firefox, Safari)
 
 ### 1. Clone and install
 
 ```bash
 git clone <repo-url> && cd deep-research-agent
 uv sync
-npm install
 ```
 
 ### 2. Configure LLM
@@ -115,11 +108,8 @@ docker compose up -d
 ### 4. Run
 
 ```bash
-# Terminal 1: Backend
 uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787
-
-# Terminal 2: Frontend (Electron)
-npm run dev
+# Then open http://127.0.0.1:8787 in your browser
 ```
 
 ## Pipeline
@@ -210,7 +200,6 @@ uv run pytest tests/ -v    # 160 tests
 |-------|-----------|
 | Backend | Python 3.12, FastAPI, LangGraph |
 | Frontend | Vanilla JS, CSS, marked.js |
-| Shell | Electron, TypeScript |
 | Search | SearXNG (self-hosted Docker) |
 | Extraction | trafilatura |
 | LLM | OpenRouter / OpenAI-compatible / Anthropic |

@@ -151,3 +151,30 @@ def get_run_report(run_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def get_report_content(run_id: str) -> str:
+    """Get the full report text for a completed run. Tries file first, then DB."""
+    run = get_run_report(run_id)
+    if not run:
+        return ""
+
+    # Try reading from the exported markdown file
+    report_path = run.get("report_path", "")
+    if report_path:
+        try:
+            return Path(report_path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            pass
+
+    # Fall back to subagent reports in database
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT content FROM subagent_reports WHERE run_id=? ORDER BY created_at",
+        (run_id,),
+    ).fetchall()
+    conn.close()
+    if rows:
+        return "\n\n".join(r["content"] for r in rows)
+
+    return ""

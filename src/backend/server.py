@@ -1,32 +1,26 @@
-"""FastAPI server — localhost only, communicates with Electron frontend."""
+"""FastAPI server — serves API and static frontend."""
 
 import asyncio
 import json
 import os
-import time
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from .config import get_config, reload_config, save_config
+from .export import export_markdown
 from .graph import build_and_run_graph
 from .models import ConfigUpdateRequest, ResearchRequest, ResearchResponse
-from .persistence import get_run_history, get_run_report, init_db, update_run_status
+from .persistence import get_report_content, get_run_history, get_run_report, init_db, update_run_status
 
 load_dotenv()
 
 app = FastAPI(title="Deep Research Agent", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 active_runs: dict[str, dict] = {}
 _cancel_flags: dict[str, asyncio.Event] = {}
@@ -50,20 +44,6 @@ def _get_error_hint(error_msg: str) -> str:
     if "rate" in lower or "429" in lower:
         return "Rate limited. Will retry automatically."
     return ""
-
-
-_current_port: int | None = None
-
-
-def get_port() -> int:
-    if _current_port:
-        return _current_port
-    return 8787
-
-
-def set_port(port: int) -> None:
-    global _current_port
-    _current_port = port
 
 
 async def _process_events(event_queue: asyncio.Queue, timeout: float = 0.05):
@@ -140,9 +120,10 @@ async def stream_research(request: ResearchRequest):
 
             final_state = graph_task.result()
             final_content = final_state.get("cited_report") or final_state.get("report", "")
-
+            report_path = ""
             if final_content:
                 yield serialize_event("final-result", {"content": final_content})
+                report_path = export_markdown(final_content)
 
             source_count = len(final_state.get("sources", []))
             report_count = len(final_state.get("subagent_reports", []))
@@ -153,6 +134,7 @@ async def stream_research(request: ResearchRequest):
                 total_sources=source_count,
                 total_reports=report_count,
                 iterations=iterations,
+                report_path=report_path,
             )
 
             yield serialize_event("complete", {
@@ -209,6 +191,7 @@ async def get_report(run_id: str):
     report = get_run_report(run_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
+    report["content"] = get_report_content(run_id)
     return report
 
 
@@ -265,6 +248,12 @@ async def list_models():
     cfg = get_config()
     visible = {name: {"type": pc.type} for name, pc in cfg.providers.items() if pc.api_key}
     return {"providers": list(visible.keys()), "details": visible}
+
+
+HERE = Path(__file__).parent          # src/backend/
+RENDERER_DIR = HERE.parent / "renderer"  # src/renderer/
+
+app.mount("/", StaticFiles(directory=str(RENDERER_DIR), html=True), name="static")
 
 
 def _translate_event(evt: dict) -> list[str]:
