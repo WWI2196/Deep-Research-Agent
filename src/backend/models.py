@@ -56,9 +56,8 @@ class ConfigUpdateRequest(BaseModel):
 class ResearchState(TypedDict, total=False):
     run_id: str
     user_query: str
-    research_plan: str
+    research_plan: dict[str, Any]  # structured plan from planner
     subtasks: list[dict[str, Any]]
-    scaling: dict[str, Any]
     subagent_reports: list[str]
     sources: list[dict[str, Any]]
     report: str

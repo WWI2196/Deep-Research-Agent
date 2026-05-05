@@ -232,19 +232,25 @@ def load_config() -> AppConfig:
 
 def save_config(cfg: AppConfig) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    yaml_cfg = {
-        "default": {"provider": cfg.default_provider, "model": cfg.default_model},
-        "roles": {
-            name: {"provider": rc.provider, "model": rc.model}
-            for name, rc in cfg.roles.items()
-        },
-        "research": {
-            "max_iterations": cfg.max_iterations,
-            "quality_threshold": cfg.quality_threshold,
-        },
+    # Preserve existing sections (providers, search, etc.) that aren't managed here
+    existing = {}
+    if CONFIG_PATH.exists():
+        with open(CONFIG_PATH) as f:
+            existing = yaml.safe_load(f) or {}
+
+    # Merge managed sections on top, keeping unmanaged keys
+    existing["default"] = {"provider": cfg.default_provider, "model": cfg.default_model}
+    existing["roles"] = {
+        name: {"provider": rc.provider, "model": rc.model}
+        for name, rc in cfg.roles.items()
     }
+    existing["research"] = {
+        "max_iterations": cfg.max_iterations,
+        "quality_threshold": cfg.quality_threshold,
+    }
+
     with open(CONFIG_PATH, "w") as f:
-        yaml.safe_dump(yaml_cfg, f, default_flow_style=False, allow_unicode=True)
+        yaml.safe_dump(existing, f, default_flow_style=False, allow_unicode=True)
 
 
 _config: AppConfig | None = None

@@ -22,9 +22,6 @@ function handleResearchEvent(evt) {
   if (e.type === 'subtasks-created') {
     store.set('subtaskList', e.subtasks || []);
   }
-  if (e.type === 'scaling-computed') {
-    store.set('scalingInfo', e.scaling || e);
-  }
   if (e.type === 'progress') {
     store.set('progressPercent', e.percent || 0);
   }

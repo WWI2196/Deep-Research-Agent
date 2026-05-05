@@ -8,59 +8,77 @@ from typing import Any
 from . import search as search_mod
 from .helpers import enforce_source_diversity, extract_json, normalize_search_item
 from .llm import chat
-from .prompts import SOURCE_SCORING, SUBAGENT_REPORT, URL_SELECTION
+from .prompts import SOURCE_EVALUATE, SUBAGENT_REPORT
 
 logger = logging.getLogger(__name__)
 
+# ── query modifiers by source type ─────────────────────────────────
 
-async def generate_search_queries(subtask: dict[str, Any]) -> list[str]:
-    prompt = (
-        "Generate 4-7 diverse web search queries for the subtask below.\n"
-        "Include broad, specific, natural-language, and entity-centric queries.\n"
-        'Return JSON: {"queries": ["q1", "q2", ...]}\n\n'
-        f"Subtask: {subtask['title']}\n"
-        f"Description: {subtask['description']}\n"
-        f"Objective: {subtask.get('objective', '')}\n"
-        f"Preferred Sources: {subtask.get('source_types', '')}"
-    )
-    response = await chat(role="subagent", messages=[{"role": "user", "content": prompt}], temperature=0.3)
-    try:
-        payload = json.loads(extract_json(response))
-        queries = payload.get("queries", [])
-        source_types = subtask.get("source_types", "")
-        if isinstance(source_types, str):
-            source_types = [s.strip() for s in source_types.split(",")]
+_SOURCE_MODIFIERS = {
+    "academic": ["research paper", "study", "pdf"],
+    "paper": ["research paper", "study"],
+    "official": ["official", "documentation", ".gov"],
+    "docs": ["documentation", "official guide"],
+    "code": ["github", "source code", "repository"],
+    "github": ["github", "source code"],
+    "news": ["latest", "2025", "report"],
+    "industry report": ["market report", "industry analysis", "2025"],
+    "data": ["statistics", "dataset", "data analysis"],
+}
 
-        modifiers: list[str] = []
-        if any("academic" in s.lower() or "paper" in s.lower() for s in source_types):
-            modifiers.extend(["research paper", "study"])
-        if any("code" in s.lower() or "github" in s.lower() for s in source_types):
-            modifiers.extend(["github", "source code"])
-        if any("official" in s.lower() or "docs" in s.lower() for s in source_types):
-            modifiers.extend(["documentation", "official guide"])
 
-        final = list(queries)
-        if modifiers:
-            for q in queries[:2]:
-                for m in modifiers[:2]:
-                    if m not in q.lower():
-                        final.append(f"{q} {m}")
+def generate_search_queries(subtask: dict[str, Any]) -> list[str]:
+    """Generate search queries from subtask keywords and source types — rules-based.
 
-        seen: set[str] = set()
-        deduped: list[str] = []
-        for q in final:
-            if q not in seen:
-                seen.add(q)
-                deduped.append(q)
-        return deduped[:10]
-    except Exception:
+    Falls back to title-based single query if no keywords are present.
+    """
+    keywords = subtask.get("keywords", [])
+    source_types = subtask.get("source_types", "")
+
+    if not keywords:
         return [subtask["title"]]
+
+    if isinstance(source_types, str):
+        source_types_list = [s.strip().lower() for s in source_types.split(",")]
+    else:
+        source_types_list = [s.lower() for s in source_types]
+
+    # Collect applicable modifiers
+    modifiers: list[str] = []
+    for st in source_types_list:
+        for key, mods in _SOURCE_MODIFIERS.items():
+            if key in st:
+                modifiers.extend(mods)
+
+    # Build queries: keyword × modifier combos
+    queries: list[str] = []
+    for kw in keywords[:5]:
+        queries.append(kw)  # raw keyword
+        for mod in modifiers[:2]:
+            if mod not in kw.lower():
+                queries.append(f"{kw} {mod}")
+
+    # Deduplicate, limit 10
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for q in queries:
+        if q not in seen:
+            seen.add(q)
+            deduped.append(q)
+
+    logger.info("Generated %d search queries from %d keywords for subtask %s",
+                len(deduped[:10]), len(keywords), subtask.get("id", "?"))
+    return deduped[:10]
 
 
 async def batch_evaluate_sources(
     sources: list[dict[str, Any]],
     user_query: str,
 ) -> list[dict[str, Any]]:
+    """Evaluate source quality AND decide full-text-worthiness in one LLM call.
+
+    Each source gets a quality_score (0.0-1.0) and a full_text flag.
+    """
     if not sources:
         return []
 
@@ -79,7 +97,7 @@ async def batch_evaluate_sources(
             response = await chat(
                 role="evaluator",
                 messages=[
-                    {"role": "system", "content": SOURCE_SCORING.format(user_query=user_query)},
+                    {"role": "system", "content": SOURCE_EVALUATE.format(user_query=user_query)},
                     {"role": "user", "content": f"Evaluate these sources:\n\n{sources_text}"},
                 ],
                 temperature=0.1,
@@ -93,11 +111,13 @@ async def batch_evaluate_sources(
             for idx, src in enumerate(batch):
                 ev = evals.get(idx)
                 src["quality_score"] = float(ev["score"]) if ev else 0.3
+                src["full_text"] = bool(ev.get("full_text", False)) if ev else False
                 src["reasoning"] = ev.get("reason", "") if ev else ""
                 scored.append(src)
         except Exception:
             for src in batch:
                 src["quality_score"] = 0.3
+                src["full_text"] = False
                 scored.append(src)
     return scored
 
@@ -142,8 +162,8 @@ async def run_subagent(
     sid = subtask["id"]
     stitle = subtask["title"]
 
-    # 1 — generate queries
-    queries = await generate_search_queries(subtask)
+    # 1 — generate queries (rules-based, no LLM call)
+    queries = generate_search_queries(subtask)
 
     # 2 — parallel search
     search_queries = queries[: max(1, min(10, tool_budget))]
@@ -166,7 +186,7 @@ async def run_subagent(
             if normalized:
                 raw_candidates.append(normalized)
 
-    # 3 — evaluate
+    # 3 — evaluate + select full-text in one LLM call
     scored = await batch_evaluate_sources(raw_candidates, subtask.get("objective", user_query))
     scored.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
 
@@ -187,12 +207,11 @@ async def run_subagent(
 
     # 3c — enforce source diversity
     scored = enforce_source_diversity(scored, max_per_domain=3)
-    sources_list = scored
 
     # Deduplicate
     seen_urls: set[str] = set()
     filtered: list[dict[str, Any]] = []
-    for s in sources_list:
+    for s in scored:
         u = s.get("url")
         if u and u not in seen_urls:
             seen_urls.add(u)
@@ -211,6 +230,17 @@ async def run_subagent(
                     "source": item.get("source", "search"),
                 })
 
+    # Determine which URLs to fetch full-text (from LLM evaluation)
+    full_text_urls: set[str] = {
+        s["url"] for s in filtered
+        if s.get("full_text") and s.get("url")
+    }
+    # Ensure at least top 5 by score if LLM didn't select enough
+    if len(full_text_urls) < 3:
+        for s in filtered[:5]:
+            if s.get("url"):
+                full_text_urls.add(s["url"])
+
     top_urls = [s.get("url") for s in filtered if s.get("url")][: min(12, tool_budget)]
     if not top_urls:
         filtered = [{"url": rc.get("url"), "title": rc.get("title", ""),
@@ -219,37 +249,7 @@ async def run_subagent(
         seen_urls.update(s.get("url") for s in filtered)
         top_urls = [s.get("url") for s in filtered if s.get("url")][: min(12, tool_budget)]
 
-    # 4 — LLM selects sources worth deep-reading
-    full_text_urls: set[str] = set()
-
-    top_for_selection = [s for s in filtered if s.get("url") in top_urls][:12]
-    if len(top_for_selection) > 2:
-        sources_text = ""
-        for i, s in enumerate(top_for_selection):
-            desc = (s.get("description") or "")[:250]
-            sources_text += (
-                f"[{i}] score={s.get('quality_score', 0):.1f} | {s.get('title', '')[:120]}\n"
-                f"    {desc}\n\n"
-            )
-
-        try:
-            response = await chat(
-                role="subagent",
-                messages=[
-                    {"role": "system", "content": URL_SELECTION.format(subtask_title=stitle)},
-                    {"role": "user", "content": f"Select sources worth full-text reading:\n\n{sources_text}"},
-                ],
-                temperature=0.1,
-            )
-            indices = json.loads(extract_json(response)).get("indices", [])
-            full_text_urls = {top_for_selection[i]["url"] for i in indices if i < len(top_for_selection)}
-        except Exception as exc:
-            logger.warning("URL selection failed, using top-5 by score: %s", exc)
-            full_text_urls = {s["url"] for s in top_for_selection[:5] if s.get("url")}
-    elif top_for_selection:
-        full_text_urls = {s["url"] for s in top_for_selection if s.get("url")}
-
-    # 5 — extract full text (markdown) via trafilatura for selected URLs
+    # 4 — extract full text (markdown) via trafilatura for full_text_urls
     async def _extract_one(url: str) -> tuple[str, str | None]:
         try:
             if url in full_text_urls:
@@ -263,7 +263,7 @@ async def run_subagent(
     extract_results = await asyncio.gather(*extract_tasks)
     extracted_map = {url: text for url, text in extract_results if text}
 
-    # 6 — build evidence: full-text for extracted, snippet for the rest
+    # 5 — build evidence
     evidence: list[dict[str, Any]] = []
     for s in filtered:
         url = s.get("url")
@@ -278,28 +278,39 @@ async def run_subagent(
 
     evidence_text = "\n\n".join(f"[From {e['url']}]: {e['data']}" for e in evidence)
 
-    # 7 — write report
-    report = await chat(
-        role="subagent",
-        messages=[{
-            "role": "system",
-            "content": SUBAGENT_REPORT.format(
-                user_query=user_query,
-                research_plan=research_plan,
-                subtask_id=sid,
-                subtask_title=stitle,
-                subtask_description=subtask.get("description", ""),
-                subtask_objective=subtask.get("objective", ""),
-                subtask_output_format=subtask.get("output_format", "markdown"),
-                subtask_tool_guidance=subtask.get("tool_guidance", ""),
-                subtask_source_types=subtask.get("source_types", ""),
-                subtask_boundaries=subtask.get("boundaries", ""),
-            ),
-        }, {
-            "role": "user",
-            "content": f"Evidence:\n{evidence_text}",
-        }],
-    )
+    # 6 — write report (retry once if too short)
+    report = ""
+    for attempt in range(2):
+        report = await chat(
+            role="subagent",
+            messages=[{
+                "role": "system",
+                "content": SUBAGENT_REPORT.format(
+                    user_query=user_query,
+                    research_plan=research_plan[:3000],
+                    subtask_id=sid,
+                    subtask_title=stitle,
+                    subtask_description=subtask.get("description", ""),
+                    subtask_objective=subtask.get("objective", ""),
+                    subtask_output_format=subtask.get("output_format", "markdown"),
+                    subtask_tool_guidance=subtask.get("tool_guidance", ""),
+                    subtask_source_types=subtask.get("source_types", ""),
+                    subtask_boundaries=subtask.get("boundaries", ""),
+                ),
+            }, {
+                "role": "user",
+                "content": f"Evidence:\n{evidence_text}" + (
+                    "\n\nYOUR PREVIOUS RESPONSE WAS EMPTY OR TOO SHORT. Write a complete 800-1500 word report."
+                    if attempt > 0 and len(report) < 200 else ""
+                ),
+            }],
+        )
+        if len(report) >= 200:
+            break
+    if len(report) < 200:
+        report = f"# {stitle}\n\n## Summary\n\nResearch on this subtask was not completed. Evidence collected: {len(evidence)} sources.\n\n## Sources\n\n" + "\n".join(
+            f"- [{e['url']}]({e['url']})" for e in evidence[:10]
+        )
 
     return {
         "subtask_id": sid,

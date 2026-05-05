@@ -18,7 +18,7 @@ from .persistence import (
     persist_subagent_report,
     update_run_status,  # noqa: F401 — used by server.py tests
 )
-from .planning import compute_scaling, generate_research_plan, split_into_subtasks
+from .planning import generate_research_plan, split_into_subtasks
 from .prompts import REFLECTION
 from .subagent import run_subagents_parallel
 from .synthesis import add_citations, synthesize_report
@@ -26,8 +26,8 @@ from .synthesis import add_citations, synthesize_report
 logger = logging.getLogger(__name__)
 
 PHASE_WEIGHTS = {
-    "init": 2, "plan": 8, "split": 5, "scale": 5,
-    "subagents": 55, "reflection": 5, "synthesize": 12, "cite": 8,
+    "init": 2, "plan": 8, "split": 5,
+    "subagents": 60, "reflection": 5, "synthesize": 12, "cite": 8,
 }
 TOTAL_WEIGHT = sum(PHASE_WEIGHTS.values())
 
@@ -69,9 +69,14 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
     async def _plan_node(s: ResearchState) -> ResearchState:
         nonlocal completed_weight
         await _emit({"type": "phase-update", "phase": "plan", "message": "Generating research plan..."})
-        s["research_plan"] = await generate_research_plan(s["user_query"])
-        await _emit({"type": "plan-generated", "plan_preview": s["research_plan"][:500],
-               "plan_length": len(s["research_plan"])})
+        plan = await generate_research_plan(s["user_query"])
+        s["research_plan"] = plan
+        dims = plan.get("dimensions", [])
+        preview = json.dumps([d.get("name", "") for d in dims], ensure_ascii=False)
+        await _emit({"type": "plan-generated",
+               "plan_preview": preview,
+               "plan_length": len(json.dumps(plan, ensure_ascii=False)),
+               "dimensions": len(dims)})
 
         pct = _progress(completed_weight, PHASE_WEIGHTS["plan"])
         await _emit({"type": "progress", "phase": "plan", "percent": pct})
@@ -87,12 +92,18 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
             s["subtasks"] = await split_into_subtasks(s["research_plan"])
         except Exception as e:
             logger.warning("Split failed, fallback: %s", e)
+            plan = s.get("research_plan", {})
+            plan_text = json.dumps(plan, ensure_ascii=False)
             s["subtasks"] = [{
                 "id": "main", "title": s["user_query"][:80],
-                "description": s["research_plan"],
+                "description": plan_text[:500],
                 "objective": s["user_query"],
-                "output_format": "markdown", "tool_guidance": "web search",
-                "source_types": "academic, official, news", "boundaries": "",
+                "output_format": "markdown",
+                "dimension": "main",
+                "keywords": plan.get("dimensions", [{}])[0].get("keywords", []) if plan.get("dimensions") else [],
+                "source_types": "academic, official, news",
+                "boundaries": "",
+                "estimated_searches": 10,
             }]
 
         await _emit({"type": "subtasks-created", "count": len(s["subtasks"]),
@@ -108,29 +119,6 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
         await persist_checkpoint(s["run_id"], "split", s)
         return s
 
-    async def _scale_node(s: ResearchState) -> ResearchState:
-        nonlocal completed_weight
-        await _emit({"type": "phase-update", "phase": "scale", "message": "Estimating complexity..."})
-        try:
-            s["scaling"] = await compute_scaling(s["user_query"], s["research_plan"])
-        except Exception:
-            n = len(s.get("subtasks", []))
-            s["scaling"] = {"complexity": "moderate", "subagent_count": n,
-                           "tool_calls_per_subagent": 10, "target_sources": n * 3}
-
-        subtasks_count = len(s.get("subtasks", []))
-        if isinstance(s.get("scaling"), dict):
-            s["scaling"]["subagent_count"] = subtasks_count
-
-        await _emit({"type": "scaling-computed", "scaling": s["scaling"]})
-
-        pct = _progress(completed_weight, PHASE_WEIGHTS["scale"])
-        await _emit({"type": "progress", "phase": "scale", "percent": pct})
-        completed_weight += PHASE_WEIGHTS["scale"]
-
-        await persist_checkpoint(s["run_id"], "scale", s)
-        return s
-
     async def _subagents_node(s: ResearchState) -> ResearchState:
         nonlocal completed_weight
         iteration = s.get("iteration_count", 0)
@@ -139,6 +127,11 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
         if not to_run:
             return s
 
+        # Use subtask-level estimated_searches as budget, default 10
+        budget = max(
+            t.get("estimated_searches", 10) for t in to_run
+        ) if to_run else 10
+
         await _emit({"type": "phase-update", "phase": "subagents",
                "message": f"Running {len(to_run)} subagents (iteration {iteration + 1})..."})
         await _emit({"type": "subagents-launch", "iteration": iteration + 1, "total_agents": len(to_run),
@@ -146,9 +139,9 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
                                   "description": t.get("description", "")[:200]}
                                  for t in to_run]})
 
-        budget = s.get("scaling", {}).get("tool_calls_per_subagent", 15)
         results = await run_subagents_parallel(
-            s["user_query"], s["research_plan"], to_run, budget,
+            s["user_query"], json.dumps(s.get("research_plan", {}), ensure_ascii=False),
+            to_run, budget,
         )
 
         existing_reports = s.get("subagent_reports", [])
@@ -177,14 +170,12 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
                    "sources_count": len(item.get("sources", [])),
                    "evidence_count": item.get("evidence_count", 0)})
 
-            # Persist subagent report
             await persist_subagent_report(
                 s["run_id"], item["subtask_id"], item.get("report", ""),
                 sources_count=len(item.get("sources", [])),
                 evidence_count=item.get("evidence_count", 0),
             )
 
-            # Persist sources for this subagent
             for src in item.get("sources", []):
                 await persist_source(
                     s["run_id"], src.get("url", ""),
@@ -218,6 +209,10 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
                "message": f"Reflecting (iter {iteration}/{max_iter})..."})
 
         try:
+            plan_dims = json.dumps(
+                s.get("research_plan", {}).get("dimensions", []),
+                ensure_ascii=False
+            )
             truncated = "\n\n".join(r[:3000] for r in reports)
             response = await chat(
                 role="reflection",
@@ -225,7 +220,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
                     "role": "user",
                     "content": REFLECTION.format(
                         user_query=s["user_query"],
-                        research_plan=s["research_plan"][:2000],
+                        research_plan=plan_dims,
                         past_subtasks=past,
                         subagent_reports=truncated,
                     ) + "\n\nReturn ONLY valid JSON.",
@@ -235,20 +230,32 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
             new_subtasks = []
             try:
                 payload = json.loads(content)
-                new_subtasks = payload.get("subtasks", [])
             except json.JSONDecodeError:
                 ext = extract_json(content)
                 if ext:
                     try:
-                        new_subtasks = json.loads(ext).get("subtasks", [])
-                    except Exception:
-                        pass
+                        payload = json.loads(ext)
+                    except json.JSONDecodeError:
+                        payload = {}
+                else:
+                    payload = {}
+
+            # Extract gap subtasks (limit 3)
+            raw_gaps = payload.get("gaps", [])[:3]
+            for gap in raw_gaps:
+                st = gap.get("subtask", {})
+                if st.get("id") and st.get("title"):
+                    new_subtasks.append(st)
+
+            overall = payload.get("overall_score", 0)
+            s["current_quality_score"] = overall
 
             if new_subtasks:
                 await _emit({"type": "reflection-decision", "decision": "gaps-found",
                        "new_subtask_count": len(new_subtasks),
                        "new_subtasks": [{"id": t.get("id", ""), "title": t.get("title", "")}
                                         for t in new_subtasks],
+                       "overall_score": overall,
                        "iteration": iteration})
                 s["subtasks"].extend(new_subtasks)
                 s["research_complete"] = False
@@ -256,7 +263,8 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
                 await _emit({"type": "reflection-decision", "decision": "research-complete",
                        "iteration": iteration,
                        "total_reports": len(reports),
-                       "total_sources": len(s.get("sources", []))})
+                       "total_sources": len(s.get("sources", [])),
+                       "overall_score": overall})
                 s["research_complete"] = True
         except Exception as e:
             logger.warning("Reflection failed: %s", e)
@@ -275,8 +283,10 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
         await _emit({"type": "phase-update", "phase": "synthesize",
                "message": f"Synthesizing {report_count} reports..."})
 
+        plan = s.get("research_plan", {})
+        plan_text = json.dumps(plan, ensure_ascii=False)
         s["report"] = await synthesize_report(
-            s["user_query"], s["research_plan"], s["subagent_reports"],
+            s["user_query"], plan_text, s["subagent_reports"],
         )
         await _emit({"type": "report-draft", "content": s["report"][:1000],
                "report_length": len(s["report"])})
@@ -310,12 +320,11 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
     def _should_continue(s: ResearchState) -> str:
         return "synthesize" if s.get("research_complete", False) else "subagents"
 
-    # Build graph
+    # Build graph — 7 nodes (scale removed)
     graph = StateGraph(ResearchState)
     graph.add_node("init", _init_node)
     graph.add_node("plan", _plan_node)
     graph.add_node("split", _split_node)
-    graph.add_node("scale", _scale_node)
     graph.add_node("subagents", _subagents_node)
     graph.add_node("reflection", _reflection_node)
     graph.add_node("synthesize", _synthesize_node)
@@ -324,8 +333,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
     graph.set_entry_point("init")
     graph.add_edge("init", "plan")
     graph.add_edge("plan", "split")
-    graph.add_edge("split", "scale")
-    graph.add_edge("scale", "subagents")
+    graph.add_edge("split", "subagents")
     graph.add_edge("subagents", "reflection")
     graph.add_conditional_edges("reflection", _should_continue, {
         "synthesize": "synthesize", "subagents": "subagents",

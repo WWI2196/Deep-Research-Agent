@@ -4,8 +4,48 @@ let inputDepth = 3;
 let selectedProvider = '';
 let selectedModel = '';
 
+function startResearch() {
+  const query = document.getElementById('query-input').value.trim();
+  if (!query) return;
+
+  const errorEl = document.getElementById('input-error');
+  errorEl.style.display = 'none';
+  document.getElementById('btn-start').disabled = true;
+
+  store.reset();
+  store.set('running', true);
+  store.set('startTime', Date.now());
+
+  navigateTo('dashboard');
+
+  streamResearch(
+    query, inputDepth, selectedProvider, selectedModel,
+    handleResearchEvent,
+    handleResearchError,
+    handleResearchDone,
+  );
+}
+
+async function loadRecent() {
+  try {
+    const data = await fetchHistory();
+    const list = document.getElementById('recent-list');
+    if (!data.history || data.history.length === 0) {
+      list.innerHTML = '<div class="recent-item"><span class="query" style="color:var(--text-tertiary)">No research history yet</span></div>';
+      return;
+    }
+    list.innerHTML = data.history.slice(0, 5).map(r => `
+      <div class="recent-item" onclick="viewHistoryReport('${r.run_id}')">
+        <span class="query">${escapeHtml(r.query)}</span>
+        <span class="meta">${timeAgo(r.started_at)} · ${r.total_sources || 0} sources</span>
+      </div>
+    `).join('');
+  } catch {
+    document.getElementById('recent-list').innerHTML = '';
+  }
+}
+
 function initInputPage() {
-  // Track listeners for cleanup — prevents double-binding on re-init
   const listeners = [];
 
   function on(el, event, handler) {
@@ -13,13 +53,11 @@ function initInputPage() {
     listeners.push(() => el.removeEventListener(event, handler));
   }
 
-  // Register cleanup
   onPageCleanup('input', () => {
     listeners.forEach(fn => fn());
     document.getElementById('btn-start').disabled = false;
   });
 
-  // Load config for model selector
   (async () => {
     try {
       const cfg = await fetchConfig();
@@ -42,7 +80,6 @@ function initInputPage() {
     }
   })();
 
-  // Depth buttons
   document.querySelectorAll('#depth-group .btn-option').forEach(btn => {
     on(btn, 'click', () => {
       document.querySelectorAll('#depth-group .btn-option').forEach(b => b.classList.remove('active'));
@@ -51,15 +88,12 @@ function initInputPage() {
     });
   });
 
-  // Model select
   on(document.getElementById('model-select'), 'change', () => {
     selectedProvider = document.getElementById('model-select').value;
   });
 
-  // Start button
   on(document.getElementById('btn-start'), 'click', startResearch);
 
-  // Enter to submit, Shift+Enter for newline; ignore IME composition
   on(document.getElementById('query-input'), 'keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
@@ -67,6 +101,7 @@ function initInputPage() {
     }
   });
 
-  // Load recent
   loadRecent();
 }
+
+window.startResearch = startResearch;

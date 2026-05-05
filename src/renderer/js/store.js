@@ -1,12 +1,11 @@
 // ── Event-driven state store ─────────────────────────────────────
 
-const PHASE_ORDER = ['init', 'plan', 'split', 'scale', 'subagents', 'reflection', 'synthesize', 'cite'];
+const PHASE_ORDER = ['init', 'plan', 'split', 'subagents', 'reflection', 'synthesize', 'cite'];
 
 const PHASE_LABELS = {
   init: 'Initializing',
   plan: 'Planning Research',
   split: 'Creating Subtasks',
-  scale: 'Estimating Complexity',
   subagents: 'Running Subagents',
   reflection: 'Reflecting & Gap Analysis',
   synthesize: 'Synthesizing Report',

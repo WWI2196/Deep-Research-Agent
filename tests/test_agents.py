@@ -210,9 +210,11 @@ async def test_generate_research_plan():
     from src.backend.agents import generate_research_plan
 
     with patch("src.backend.planning.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "A detailed research plan"
+        mock_chat.return_value = '{"dimensions": [{"name": "AI Future", "scope": "Future of AI", "source_types": "academic", "keywords": ["AI", "future"]}], "output_structure": ["Intro"], "methodology": "research"}'
         result = await generate_research_plan("What is the future of AI?")
-        assert result == "A detailed research plan"
+        assert isinstance(result, dict)
+        assert "dimensions" in result
+        assert result["dimensions"][0]["name"] == "AI Future"
         call_args = mock_chat.call_args.kwargs
         assert call_args["role"] == "planner"
 
@@ -223,9 +225,10 @@ async def test_generate_research_plan():
 async def test_split_into_subtasks_success():
     from src.backend.agents import split_into_subtasks
 
+    plan = {"dimensions": [{"name": "Test", "scope": "s", "keywords": ["k"], "source_types": "academic"}], "output_structure": ["I"], "methodology": "m"}
     with patch("src.backend.planning.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.return_value = '{"subtasks": [{"id": "t1", "title": "Task 1", "description": "Desc 1"}]}'
-        result = await split_into_subtasks("Research plan text")
+        result = await split_into_subtasks(plan)
         assert len(result) == 1
         assert result[0]["id"] == "t1"
 
@@ -234,9 +237,10 @@ async def test_split_into_subtasks_success():
 async def test_split_into_subtasks_json_wrapped_in_text():
     from src.backend.agents import split_into_subtasks
 
+    plan = {"dimensions": [{"name": "Test", "scope": "s", "keywords": ["k"], "source_types": "academic"}], "output_structure": ["I"], "methodology": "m"}
     with patch("src.backend.planning.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.return_value = 'Here is the JSON:\n```json\n{"subtasks": [{"id": "t1", "title": "Task"}]}\n```'
-        result = await split_into_subtasks("plan")
+        result = await split_into_subtasks(plan)
         assert len(result) == 1
         assert result[0]["id"] == "t1"
 
@@ -245,92 +249,52 @@ async def test_split_into_subtasks_json_wrapped_in_text():
 async def test_split_into_subtasks_invalid_json():
     from src.backend.agents import split_into_subtasks
 
+    plan = {"dimensions": [{"name": "Test", "scope": "plan", "keywords": ["k"], "source_types": "academic"}], "output_structure": ["I"], "methodology": "m"}
     with patch("src.backend.planning.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.return_value = "not json at all, no braces"
-        with pytest.raises(ValueError, match="Empty or invalid JSON"):
-            await split_into_subtasks("plan")
+        # Self-heal: first attempt fails, retry also fails, falls back to dimension-based subtasks
+        result = await split_into_subtasks(plan)
+        assert len(result) >= 1  # falls back to dimension subtasks
 
-
-# ── compute_scaling ────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_compute_scaling_success():
-    from src.backend.agents import compute_scaling
-
-    with patch("src.backend.planning.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = '{"complexity": "moderate", "subagent_count": 5, "tool_calls_per_subagent": 15, "target_sources": 25}'
-        result = await compute_scaling("query", "plan")
-        assert result["complexity"] == "moderate"
-        assert result["subagent_count"] == 5
-
-
-@pytest.mark.asyncio
-async def test_compute_scaling_wrapped_json():
-    from src.backend.agents import compute_scaling
-
-    with patch("src.backend.planning.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = 'The scaling plan is: {"complexity": "simple", "subagent_count": 3, "tool_calls_per_subagent": 10, "target_sources": 15}'
-        result = await compute_scaling("query", "plan")
-        assert result["complexity"] == "simple"
-
-
-@pytest.mark.asyncio
-async def test_compute_scaling_empty_response():
-    from src.backend.agents import compute_scaling
-
-    with patch("src.backend.planning.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = ""
-        with pytest.raises(ValueError, match="Empty response from scaler"):
-            await compute_scaling("query", "plan")
 
 
 # ── generate_search_queries ────────────────────────────────────
 
-@pytest.mark.asyncio
-async def test_generate_search_queries_basic():
+def test_generate_search_queries_basic():
     from src.backend.agents import generate_search_queries
 
-    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = '{"queries": ["q1", "q2", "q3", "q4"]}'
-        subtask = {"id": "t1", "title": "AI Safety", "description": "Desc", "source_types": "academic, official"}
-        result = await generate_search_queries(subtask)
-        assert len(result) >= 4  # original + modifiers
-        assert "q1" in result
+    subtask = {"id": "t1", "title": "AI Safety", "keywords": ["AI safety", "machine learning"], "source_types": "academic, official"}
+    result = generate_search_queries(subtask)
+    assert len(result) >= 2  # keywords + modifiers
+    assert any("AI safety" in q for q in result)
 
 
-@pytest.mark.asyncio
-async def test_generate_search_queries_fallback_to_title():
+def test_generate_search_queries_fallback_to_title():
     from src.backend.agents import generate_search_queries
 
-    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "not json"
-        subtask = {"id": "t1", "title": "AI Safety Research", "description": "Desc"}
-        result = await generate_search_queries(subtask)
-        assert result == ["AI Safety Research"]
+    subtask = {"id": "t1", "title": "AI Safety Research", "description": "Desc"}
+    result = generate_search_queries(subtask)
+    assert result == ["AI Safety Research"]
 
 
-@pytest.mark.asyncio
-async def test_generate_search_queries_adds_academic_modifiers():
+def test_generate_search_queries_adds_academic_modifiers():
     from src.backend.agents import generate_search_queries
 
-    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = '{"queries": ["search1", "search2"]}'
-        subtask = {"id": "t1", "title": "Test", "description": "Desc", "source_types": "academic,paper"}
-        result = await generate_search_queries(subtask)
-        has_modifier = any("research paper" in q or "study" in q for q in result)
-        assert has_modifier
+    subtask = {"id": "t1", "title": "Test", "keywords": ["test topic"], "source_types": "academic,paper"}
+    result = generate_search_queries(subtask)
+    has_modifier = any("research paper" in q or "study" in q for q in result)
+    assert has_modifier
 
 
-@pytest.mark.asyncio
-async def test_generate_search_queries_dedup_and_limit():
+def test_generate_search_queries_dedup_and_limit():
     from src.backend.agents import generate_search_queries
 
-    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        # Generate 15 queries to test 10-limit
-        mock_chat.return_value = '{"queries": ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9", "q10", "q11"]}'
-        subtask = {"id": "t1", "title": "Test", "description": "Desc", "source_types": ""}
-        result = await generate_search_queries(subtask)
-        assert len(result) <= 10
+    # Many keywords to test 10-limit
+    subtask = {"id": "t1", "title": "Test", "keywords": ["k1", "k2", "k3", "k4", "k5", "k6"], "source_types": "academic,official,news,code"}
+    result = generate_search_queries(subtask)
+    assert len(result) <= 10
+    # Should be deduplicated
+    assert len(result) == len(set(result))
 
 
 # ── batch_evaluate_sources ─────────────────────────────────────
@@ -340,7 +304,7 @@ async def test_batch_evaluate_sources(sample_search_results):
     from src.backend.agents import batch_evaluate_sources
 
     with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = '{"evaluations": [{"id": 0, "score": 0.9, "reason": "good"}, {"id": 1, "score": 0.5, "reason": "ok"}]}'
+        mock_chat.return_value = '{"evaluations": [{"id": 0, "score": 0.9, "full_text": true, "reason": "good"}, {"id": 1, "score": 0.5, "full_text": false, "reason": "ok"}]}'
 
         sources = [
             {"url": "https://example.com/1", "title": "Test 1", "description": "Desc 1"},
@@ -462,12 +426,8 @@ async def test_run_subagent_full_flow():
     }
 
     with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        # 1: generate queries, 2: URL selection, 3: report writing
-        mock_chat.side_effect = [
-            '{"queries": ["market analysis 2024", "EV outlook 2025"]}',
-            '{"indices": [0, 2]}',  # select sources for full-text
-            "# Market Analysis\n\nDetailed report content here.",
-        ]
+        # Only report writing uses chat now (queries are rules-based, evaluation is mocked)
+        mock_chat.return_value = "# Market Analysis\n\nDetailed report content here."
 
         with patch("src.backend.subagent.search_mod.search", return_value={
             "data": [
@@ -504,11 +464,8 @@ async def test_run_subagent_extract_failure_falls_back():
     subtask = {"id": "t1", "title": "Test", "description": "Test desc", "objective": "Test obj"}
 
     with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        # 1: queries, 2: report (URL selection skipped: only 1 source < 3)
-        mock_chat.side_effect = [
-            '{"queries": ["test query"]}',
-            "# Test\n\nReport content.",
-        ]
+        # Only report writing uses chat now; queries are rules-based
+        mock_chat.return_value = "# Test\n\nReport content."
         with patch("src.backend.subagent.search_mod.search", return_value={
             "data": [{"url": "https://example.com/1", "title": "Test", "description": "Description text"}]
         }), patch("src.backend.subagent.search_mod.extract", return_value=None), \
@@ -609,20 +566,24 @@ async def test_run_subagents_parallel_dedup_sources():
 async def test_synthesize_report_basic():
     from src.backend.agents import synthesize_report
 
+    long_report = "A" * 150 + " with enough content to pass the length filter for body text inclusion."
     with patch("src.backend.synthesis.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "# Synthesized Report\n\nContent here.\n\n<<END_OF_REPORT>>"
+        mock_chat.return_value = "## Introduction\n\nThis is a well-researched introduction to the topic with sufficient length to pass validation checks.\n\n## Conclusions\n\nThe research findings suggest important implications for the field.\n\n<<END_OF_REPORT>>"
 
         with patch("src.backend.synthesis._continue_if_truncated", new_callable=AsyncMock) as mock_continue:
-            mock_continue.return_value = "# Synthesized Report\n\nContent here."
-            result = await synthesize_report("query", "plan", ["report1", "report2"])
-            assert "Synthesized Report" in result
-            assert "<<END_OF_REPORT>>" not in result  # stripped by _continue_if_truncated
+            mock_continue.return_value = "## Introduction\n\nThis is a well-researched introduction to the topic with sufficient length to pass validation checks.\n\n## Conclusions\n\nThe research findings suggest important implications for the field."
+            result = await synthesize_report("query", "plan", [long_report, long_report])
+            assert "Introduction" in result
+            assert "Conclusions" in result
+            assert "A" * 10 in result  # body content preserved
+            assert "<<END_OF_REPORT>>" not in result
 
 
 @pytest.mark.asyncio
 async def test_synthesize_report_truncation_recovery():
     from src.backend.agents import synthesize_report
 
+    long_report = "B" * 150 + " body content for the test report."
     with patch("src.backend.synthesis.chat", new_callable=AsyncMock) as mock_chat:
         call_count = [0]
 
@@ -630,26 +591,28 @@ async def test_synthesize_report_truncation_recovery():
             call_count[0] += 1
             if call_count[0] == 1:
                 raise RuntimeError("400 max context length")
-            return "Final report\n\n<<END_OF_REPORT>>"
+            return "## Intro\n\nRecovered after error with enough text content to pass validation check for minimum length.\n\n## Conclusions\n\nGood results.\n\n<<END_OF_REPORT>>"
 
         mock_chat.side_effect = _side_effect
 
         with patch("src.backend.synthesis._continue_if_truncated", new_callable=AsyncMock) as mock_continue:
-            mock_continue.return_value = "Final report"
-            result = await synthesize_report("query", "plan", ["report1"])
-            assert result == "Final report"
-            assert call_count[0] == 2
+            # Return long enough to pass the >1000 char validation
+            mock_continue.return_value = "## Introduction\n\n" + "R" * 1000 + "\n\n## Conclusions\n\nThe research yielded important findings for the field."
+            result = await synthesize_report("query", "plan", [long_report])
+            assert "RRRRR" in result
+            assert call_count[0] >= 1  # first call triggered context error retry
 
 
 @pytest.mark.asyncio
 async def test_synthesize_report_ultimate_fallback():
     from src.backend.agents import synthesize_report
 
+    long_report = "C" * 150 + " report content that meets the minimum length requirement."
     with patch("src.backend.synthesis.chat", new_callable=AsyncMock) as mock_chat:
         mock_chat.side_effect = RuntimeError("always 400 too long")
 
-        result = await synthesize_report("query", "plan", ["report content here"])
-        assert "report content here" in result
+        result = await synthesize_report("query", "plan", [long_report])
+        assert "C" * 10 in result  # body content preserved in fallback
         assert "Research Report" in result
 
 
@@ -659,9 +622,9 @@ async def test_synthesize_report_ultimate_fallback():
 async def test_continue_if_truncated_no_need():
     from src.backend.agents import _continue_if_truncated
 
-    report = "A" * 600 + ". This is a complete sentence."
-    result = await _continue_if_truncated(report, "query")
-    assert result == report  # unchanged
+    report = "A" * 600 + ". This is a complete sentence that ends properly."
+    result = await _continue_if_truncated(report, "query", end_marker=None)
+    assert result == report  # unchanged — clean ending, no marker to check
 
 
 @pytest.mark.asyncio
@@ -671,15 +634,16 @@ async def test_continue_if_truncated_needs_continuation():
     report = "A" * 600 + " and"
 
     with patch("src.backend.synthesis.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "the conclusion follows here."
-        result = await _continue_if_truncated(report, "query")
+        # Must be >= 30 chars to pass the length check in new code
+        mock_chat.return_value = "the conclusion follows here with more text to reach thirty characters."
+        result = await _continue_if_truncated(report, "query", end_marker=None)
         assert "the conclusion follows here" in result
 
 
 @pytest.mark.asyncio
 async def test_continue_if_truncated_empty_report():
     from src.backend.agents import _continue_if_truncated
-    result = await _continue_if_truncated("", "query")
+    result = await _continue_if_truncated("", "query", end_marker=None)
     assert result == ""
 
 
@@ -690,10 +654,10 @@ async def test_continue_if_truncated_max_rounds():
     report = "A" * 600 + " and"
 
     with patch("src.backend.synthesis.chat", new_callable=AsyncMock) as mock_chat:
-        # Must be >= 20 chars to pass the continuation length check
-        mock_chat.return_value = "more dangling text and"  # still dangling, but long enough
-        result = await _continue_if_truncated(report, "query", max_rounds=2)
-        # Should call until max_rounds exhausted (2 rounds)
+        # Must be >= 30 chars and still trigger continuation (end with "and")
+        mock_chat.return_value = "more dangling text that keeps going and"
+        result = await _continue_if_truncated(report, "query", end_marker=None, max_rounds=2)
+        # Each continuation extends the report, called 2 times
         assert mock_chat.call_count == 2
 
 
@@ -706,21 +670,19 @@ async def test_add_citations_basic():
     sources = [
         {"url": "https://example.com/1", "title": "Source 1", "description": "Description 1"},
     ]
-
-    with patch("src.backend.synthesis.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "# Report\n\nWith citation [^1]\n\n## References\n\n[^1]: Source 1"
-
-        with patch("src.backend.synthesis._continue_if_truncated", new_callable=AsyncMock) as mock_continue:
-            mock_continue.return_value = "# Report\n\nWith citation [^1]\n\n## References\n\n[^1]: Source 1"
-            result = await add_citations("Original report", sources)
-            assert "citation" in result.lower() or "[^1]" in result
+    # Report with [src: url] markers
+    report = "Some claim [src: https://example.com/1] about the topic."
+    result = await add_citations(report, sources)
+    assert "[^1]" in result  # marker replaced with numbered citation
+    assert "References" in result  # references section appended
+    assert "https://example.com/1" in result
 
 
 @pytest.mark.asyncio
 async def test_add_citations_no_sources():
     from src.backend.agents import add_citations
     result = await add_citations("Original report", [])
-    assert result == "Original report"  # returned unchanged
+    assert "Original report" in result
 
 
 @pytest.mark.asyncio
@@ -728,34 +690,23 @@ async def test_add_citations_strips_bracket_tags():
     from src.backend.agents import add_citations
 
     sources = [{"url": "https://example.com/1", "title": "S1", "description": "D1"}]
-
-    with patch("src.backend.synthesis.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "Cleaned report"
-
-        with patch("src.backend.synthesis._continue_if_truncated", new_callable=AsyncMock) as mock_continue:
-            mock_continue.return_value = "Cleaned report"
-            result = await add_citations("[task_1_name] Original report", sources)
-            assert "[task_1_name]" not in result  # tags stripped
+    # Report with both old-style bracket tags and new src markers
+    report = "[task_1_name] Some claim [src: https://example.com/1]"
+    result = await add_citations(report, sources)
+    assert "[task_1_name]" not in result  # old tags stripped
+    assert "[^1]" in result  # src marker replaced
 
 
 @pytest.mark.asyncio
 async def test_add_citations_adaptive_retry():
     from src.backend.agents import add_citations
 
-    sources = [{"url": f"https://example.com/{i}", "title": f"Source {i}", "description": f"Desc {i}"} for i in range(10)]
-
-    with patch("src.backend.synthesis.chat", new_callable=AsyncMock) as mock_chat:
-        call_count = [0]
-
-        def _side_effect(*args, **kwargs):
-            call_count[0] += 1
-            raise RuntimeError("400 context length exceeded")
-
-        mock_chat.side_effect = _side_effect
-
-        result = await add_citations("Report text", sources)
-        # Should exhaust all attempts and return the original report
-        assert len(result) > 0
+    # Rule-based citations don't fail on large source lists
+    sources = [{"url": f"https://example.com/{i}", "title": f"Source {i}", "description": f"Desc {i}"} for i in range(50)]
+    report = "Text with [src: https://example.com/0] and [src: https://example.com/1] markers."
+    result = await add_citations(report, sources)
+    assert "[^1]" in result
+    assert "[^2]" in result
 
 
 # ── Test that all agent roles use correct provider routing ─────

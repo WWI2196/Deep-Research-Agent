@@ -38,11 +38,9 @@ function renderPhaseTimeline() {
     let detail = '';
 
     if (step.id === 'plan' && store.get('planPreview')) {
-      detail = `Plan generated (${formatNumber(store.get('planPreview').length)} chars)`;
+      detail = store.get('planPreview');
     } else if (step.id === 'split' && store.get('subtaskList').length) {
       detail = `${store.get('subtaskList').length} subtasks created`;
-    } else if (step.id === 'scale' && store.get('scalingInfo')) {
-      detail = `Complexity: ${store.get('scalingInfo').complexity}`;
     } else if (step.id === 'subagents') {
       const agents = Object.values(store.get('subagents'));
       const done = agents.filter(a => a.status === 'complete').length;

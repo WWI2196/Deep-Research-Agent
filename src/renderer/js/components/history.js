@@ -14,8 +14,12 @@ async function initHistoryPage() {
           <th>Query</th><th>Status</th><th>Sources</th><th>Reports</th><th>Iterations</th><th>Time</th><th></th>
         </tr></thead>
         <tbody>
-          ${data.history.map(r => `
-            <tr onclick="viewHistoryReport('${r.run_id}')">
+          ${data.history.map(r => {
+            const isCompleted = r.status === 'completed';
+            const onClick = isCompleted ? `onclick="viewHistoryReport('${r.run_id}')"` : '';
+            const rowClass = isCompleted ? 'clickable' : 'not-clickable';
+            return `
+            <tr class="${rowClass}" ${onClick} style="${isCompleted ? '' : 'opacity:0.6;cursor:default'}">
               <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(r.query)}</td>
               <td><span class="history-status ${r.status}">${r.status}</span></td>
               <td>${r.total_sources || 0}</td>
@@ -23,8 +27,8 @@ async function initHistoryPage() {
               <td>${r.iterations || 0}</td>
               <td style="color:var(--text-tertiary);font-size:11px">${timeAgo(r.started_at)}</td>
               <td><button class="history-delete-btn" onclick="deleteHistoryItem(event, '${r.run_id}')" title="Delete">×</button></td>
-            </tr>
-          `).join('')}
+            </tr>`;
+          }).join('')}
         </tbody>
       </table>
     `;
