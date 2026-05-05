@@ -4,17 +4,20 @@ A multi-agent deep research system that plans, searches, reads, reflects, and sy
 
 ## Features
 
-- **8-node LangGraph pipeline**: `init → plan → split → scale → subagents → reflection → synthesize → cite`
+- **7-node LangGraph pipeline**: `init → plan → split → subagents → reflection → synthesize → cite`
+- **Structured planning**: Planner outputs JSON with dimensions, keywords, and source_types per dimension
+- **Rules-based query generation**: Search queries derived from dimension keywords × source type modifiers (no LLM call)
+- **Merged evaluation + selection**: Source scoring and full-text selection in a single LLM call
 - **Parallel subagents**: multiple research angles investigated concurrently via `asyncio.gather`
-- **Reflection loop**: audits coverage gaps, spawns follow-up subtasks until `max_iterations` reached
+- **Quantitative reflection**: Per-dimension 4-axis scoring (coverage/depth/evidence/recency), only low-score dimensions trigger gap-fill subtasks
+- **Truncation recovery**: Multi-round continuation synthesis with auto-detection of cut-off output
+- **Rule-based citations**: Subagent reports use `[src: url]` markers; deterministic `[^n]` numbering + References generation — zero LLM hallucination risk
 - **SearXNG search**: self-hosted, 70+ engines aggregated (Google, Bing, Wikipedia, arXiv, etc.) — free, unlimited
 - **trafilatura extraction**: free content fetching with clean markdown output — no paid scraping APIs
-- **LLM URL selection**: subagent LLM decides which search results are worth full-text reading
-- **Citation pass**: dedicated stage aligns claims to sources and generates inline references
 - **Real-time SSE streaming**: all pipeline events pushed to frontend via `POST /api/research/stream`
-- **Multi-provider LLM routing**: 8 roles can use different models; 6 built-in providers (mimo, openai, anthropic, gemini, deepseek, openrouter)
+- **Multi-provider LLM routing**: 7 roles can use different models; 6 built-in providers (mimo, openai, anthropic, gemini, deepseek, openrouter)
 - **SQLite persistence**: runs, checkpoints, sources, reports stored locally at `~/.deep-research/history.db`
-- **160 tests**: pytest + pytest-asyncio covering all backend modules
+- **205 tests**: 156 pytest + 49 vitest/jsdom frontend tests
 
 ## Architecture
 
@@ -26,14 +29,14 @@ Browser (http://127.0.0.1:8787)
 ┌───────────────────────────────────────────────────────┐
 │                Python Backend (:8787)                  │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐  │
-│  │ server.py│ │ graph.py │ │agents.py │ │search.py│  │
-│  │ FastAPI  │ │LangGraph │ │ 8 roles  │ │SearXNG  │  │
-│  │ Static   │ │8 nodes   │ │_chat()   │ │trafilatura│ │
-│  │ Files    │ │          │ │          │ │         │  │
+│  │ server.py│ │ graph.py │ │subagent  │ │search.py│  │
+│  │ FastAPI  │ │LangGraph │ │planning  │ │SearXNG  │  │
+│  │ Static   │ │7 nodes   │ │synthesis │ │trafilatura│ │
+│  │ Files    │ │          │ │llm.py    │ │         │  │
 │  └──────────┘ └──────────┘ └──────────┘ └─────────┘  │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐              │
 │  │config.py │ │persist.py│ │prompts.py│              │
-│  │yaml+env  │ │ SQLite   │ │9 prompts │              │
+│  │yaml+env  │ │ SQLite   │ │6 prompts │              │
 │  └──────────┘ └──────────┘ └──────────┘              │
 └───────────────────────────────────────────────────────┘
         │
@@ -83,7 +86,7 @@ roles:
   reflection:  { provider: openrouter, model: anthropic/claude-sonnet-4 }
 
 research:
-  max_iterations: 3
+  max_iterations: 2
   quality_threshold: 0.7
 ```
 
@@ -118,32 +121,29 @@ uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787
 User Query
   │
   ▼
-init ──── initialise state, assign run_id
+init ──────── initialise state, assign run_id
   │
   ▼
-plan ──── generate research strategy
+plan ──────── generate structured research plan (JSON: dimensions + keywords)
   │
   ▼
-split ─── break plan into 3–8 parallel subtasks
+split ─────── break plan into 3–8 parallel subtasks (self-heal on JSON errors)
   │
   ▼
-scale ─── estimate complexity, set search budget
+subagents ──┬── subagent 1: rules-based queries → search → evaluate+select → extract → report [src: url]
+            ├── subagent 2: rules-based queries → search → evaluate+select → extract → report [src: url]
+            └── subagent N: ...
   │
   ▼
-subagents ──┬── subagent 1: search → select URLs → extract → report
-            ├── subagent 2: search → select URLs → extract → report
-            └── subagent N: search → select URLs → extract → report
-  │
-  ▼
-reflection ── audit coverage, find gaps
+reflection ── per-dimension 4-axis scoring (coverage/depth/evidence/recency)
   │           │
-  │    gaps found ──→ create new subtasks ──→ subagents (loop)
+  │    gaps (<0.6) ──→ create targeted subtasks (max 3) ──→ subagents (loop)
   │
   ▼
-synthesize ── merge all reports into one comprehensive article
+synthesize ── single-pass LLM synthesis (max_tokens=16384) + truncation continuation
   │
   ▼
-cite ──────── add inline citations, generate references section
+cite ──────── rule-based: parse [src: url] → assign [^n] → generate References
   │
   ▼
 END ──────── stream final report via SSE
@@ -152,13 +152,14 @@ END ──────── stream final report via SSE
 ### Subagent detail
 
 ```
-generate queries → SearXNG search (parallel)
-  → batch evaluate source quality
-  → enforce domain diversity
-  → LLM selects URLs for full-text reading
+rules-based query generation (keywords × source_type modifiers)
+  → SearXNG search (parallel, asyncio.gather)
+  → batch evaluate + select full-text (single LLM call)
+  → enforce domain diversity (max 3 per domain)
+  → adaptive query refinement (if avg quality < 0.5)
   → trafilatura extract (parallel, markdown)
   → build evidence: [FULL-TEXT] + [SNIPPET]
-  → write 800–1500 word report
+  → write 800–1500 word report with [src: url] markers
 ```
 
 ## API Endpoints
@@ -178,21 +179,24 @@ generate queries → SearXNG search (parallel)
 ## Testing
 
 ```bash
-uv run pytest tests/ -v    # 160 tests
+uv run pytest tests/ -v    # 156 backend tests
+npx vitest run             # 49 frontend tests
 ```
 
-| Module | Tests | Coverage |
-|--------|-------|----------|
-| config.py | 21 | ~90% |
-| search.py | 7 | ~85% |
-| agents.py | 60 | ~80% |
-| graph.py | 10 | ~85% |
-| server.py | 17 | ~85% |
-| persistence.py | 9 | ~85% |
-| models.py | 10 | ~85% |
-| providers/ | 20 | ~90% |
-| export.py | 3 | ~90% |
-| integration | 3 | cross-module |
+| Module | Tests |
+|--------|-------|
+| config.py | 21 |
+| search.py | 7 |
+| agent functions | 55 |
+| graph.py | 10 |
+| server.py | 17 |
+| persistence.py | 9 |
+| models.py | 10 |
+| providers/ | 20 |
+| export.py | 3 |
+| integration | 3 |
+| frontend (vitest) | 49 |
+| **Total** | **205** |
 
 ## Tech Stack
 
@@ -204,7 +208,7 @@ uv run pytest tests/ -v    # 160 tests
 | Extraction | trafilatura |
 | LLM | OpenRouter / OpenAI-compatible / Anthropic |
 | Storage | SQLite |
-| Testing | pytest, pytest-asyncio |
+| Testing | pytest, pytest-asyncio, vitest + jsdom |
 | Package | uv (pyproject.toml) |
 
 ## License
