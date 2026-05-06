@@ -105,6 +105,8 @@ async def stream_research(request: ResearchRequest):
                 "errors": [],
                 "max_iterations": request.max_iterations or cfg.max_iterations,
                 "quality_threshold": request.quality_threshold or cfg.quality_threshold,
+                "context_compress_retries": request.context_compress_retries or cfg.context_compress_retries,
+                "keep_tool_results": request.keep_tool_results or cfg.keep_tool_results,
             }
 
             graph_task = asyncio.create_task(
@@ -218,6 +220,8 @@ async def get_app_config():
         "default_model": cfg.default_model,
         "max_iterations": cfg.max_iterations,
         "quality_threshold": cfg.quality_threshold,
+        "context_compress_retries": cfg.context_compress_retries,
+        "keep_tool_results": cfg.keep_tool_results,
         "providers": visible,
         "available_providers": list(visible.keys()),
         "roles": cfg.to_dict().get("roles", {}),
@@ -235,6 +239,10 @@ async def update_config(request: ConfigUpdateRequest):
         cfg.max_iterations = request.max_iterations
     if request.quality_threshold is not None:
         cfg.quality_threshold = request.quality_threshold
+    if request.context_compress_retries is not None:
+        cfg.context_compress_retries = request.context_compress_retries
+    if request.keep_tool_results is not None:
+        cfg.keep_tool_results = request.keep_tool_results
     if request.roles:
         from .config import RoleConfig
         for role_name, role_data in request.roles.items():

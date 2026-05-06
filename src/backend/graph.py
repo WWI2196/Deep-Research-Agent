@@ -8,7 +8,7 @@ from typing import Any
 from langgraph.graph import END, StateGraph
 
 from .config import get_config
-from .helpers import extract_json
+from .helpers import extract_json, needs_continuation
 from .llm import chat
 from .models import ResearchState
 from .persistence import (
@@ -56,6 +56,13 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
         s["quality_threshold"] = s.get("quality_threshold") or cfg.quality_threshold
         s["current_quality_score"] = 0.0
         s["memory"] = {}
+        s["synthesis_retry_count"] = 0
+        s["synthesis_failure_summary"] = ""
+        s["context_compress_retries"] = (
+            s.get("context_compress_retries") or cfg.context_compress_retries
+        )
+        s["keep_tool_results"] = s.get("keep_tool_results") or cfg.keep_tool_results
+        s["query_cache"] = {}
 
         await _emit({"type": "phase-update", "phase": "init",
                "message": f"Initialised (provider: {cfg.default_provider}, model: {cfg.default_model})"})
@@ -142,6 +149,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
         results = await run_subagents_parallel(
             s["user_query"], json.dumps(s.get("research_plan", {}), ensure_ascii=False),
             to_run, budget,
+            query_cache=s.get("query_cache", {}),
         )
 
         existing_reports = s.get("subagent_reports", [])
@@ -201,8 +209,31 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
         past = ", ".join(f"{t.get('id')}: {t.get('title')}" for t in subtasks)
 
         if iteration >= max_iter:
+            quality = s.get("current_quality_score", 0.0)
+            threshold = s.get("quality_threshold", 0.7)
+            retry_count = s.get("synthesis_retry_count", 0)
+            max_retries = s.get("context_compress_retries", cfg.context_compress_retries)
+
+            if quality < threshold and retry_count < max_retries:
+                from .synthesis import _generate_failure_summary
+                summary = await _generate_failure_summary(
+                    user_query=s["user_query"],
+                    research_plan=json.dumps(s.get("research_plan", {}), ensure_ascii=False),
+                    reports=s.get("subagent_reports", []),
+                    partial_report="",
+                    reason=f"low-quality ({quality:.2f} below threshold {threshold})",
+                    chat_fn=chat,
+                )
+                s["synthesis_failure_summary"] = summary
+                s["synthesis_retry_count"] = retry_count + 1
+                await _emit({"type": "reflection-decision", "decision": "low-quality-retry",
+                       "quality_score": quality, "threshold": threshold,
+                       "iteration": iteration, "retry_count": retry_count + 1})
+            else:
+                await _emit({"type": "reflection-decision", "decision": "max-iterations-reached",
+                       "iteration": iteration})
+
             s["research_complete"] = True
-            await _emit({"type": "reflection-decision", "decision": "max-iterations-reached", "iteration": iteration})
             return s
 
         await _emit({"type": "phase-update", "phase": "reflection",
@@ -285,9 +316,34 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
 
         plan = s.get("research_plan", {})
         plan_text = json.dumps(plan, ensure_ascii=False)
+        failure_summary = s.get("synthesis_failure_summary", "")
+        retry_count = s.get("synthesis_retry_count", 0)
+        max_retries = s.get("context_compress_retries", cfg.context_compress_retries)
+
         s["report"] = await synthesize_report(
             s["user_query"], plan_text, s["subagent_reports"],
+            failure_summary=failure_summary,
         )
+
+        # Retry if still truncated after continuation rounds
+        if needs_continuation(s["report"]) and retry_count < max_retries and not failure_summary:
+            from .synthesis import _generate_failure_summary
+            summary = await _generate_failure_summary(
+                user_query=s["user_query"],
+                research_plan=plan_text,
+                reports=s["subagent_reports"],
+                partial_report=s["report"],
+                reason="truncated after continuation rounds",
+                chat_fn=chat,
+            )
+            s["synthesis_failure_summary"] = summary
+            s["synthesis_retry_count"] = retry_count + 1
+
+            s["report"] = await synthesize_report(
+                s["user_query"], plan_text, s["subagent_reports"],
+                failure_summary=summary,
+            )
+
         await _emit({"type": "report-draft", "content": s["report"][:1000],
                "report_length": len(s["report"])})
 
@@ -306,9 +362,17 @@ async def build_and_run_graph(state: dict[str, Any], on_event) -> dict[str, Any]
 
         if source_count == 0:
             s["cited_report"] = s.get("report", "")
+            verification: dict[str, bool] = {}
         else:
-            s["cited_report"] = await add_citations(s["report"], s.get("sources", []))
-        await _emit({"type": "citations-added", "cited_report_length": len(s["cited_report"])})
+            s["cited_report"], verification = await add_citations(
+                s["report"], s.get("sources", []),
+            )
+        total_urls = len(verification)
+        accessible = sum(1 for v in verification.values() if v)
+        await _emit({"type": "citations-added",
+               "cited_report_length": len(s["cited_report"]),
+               "urls_checked": total_urls,
+               "urls_accessible": accessible})
 
         pct = _progress(completed_weight, PHASE_WEIGHTS["cite"])
         await _emit({"type": "progress", "phase": "cite", "percent": pct})

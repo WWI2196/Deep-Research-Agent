@@ -77,6 +77,8 @@ class AppConfig:
     quality_threshold: float = 0.7
     max_sources_per_domain: int = 3
     tool_calls_per_subagent: int = 15
+    context_compress_retries: int = 1
+    keep_tool_results: int = 5
     roles: dict[str, RoleConfig] = field(default_factory=dict)
 
     def get_role(self, name: str) -> RoleConfig:
@@ -93,6 +95,8 @@ class AppConfig:
             "default_model": self.default_model,
             "max_iterations": self.max_iterations,
             "quality_threshold": self.quality_threshold,
+            "context_compress_retries": self.context_compress_retries,
+            "keep_tool_results": self.keep_tool_results,
             "roles": {
                 name: {"provider": rc.provider, "model": rc.model}
                 for name, rc in self.roles.items()
@@ -213,6 +217,8 @@ def load_config() -> AppConfig:
         quality_threshold=_research_float("QUALITY_THRESHOLD", "quality_threshold", 0.7),
         max_sources_per_domain=_research_int("MAX_SOURCES_PER_DOMAIN", "max_sources_per_domain", 3),
         tool_calls_per_subagent=_research_int("TOOL_CALLS_PER_SUBAGENT", "tool_calls_per_subagent", 15),
+        context_compress_retries=_research_int("CONTEXT_COMPRESS_RETRIES", "context_compress_retries", 1),
+        keep_tool_results=_research_int("KEEP_TOOL_RESULTS", "keep_tool_results", 5),
     )
 
     # ── Role overrides: env > yaml > (follow default) ──
@@ -247,6 +253,8 @@ def save_config(cfg: AppConfig) -> None:
     existing["research"] = {
         "max_iterations": cfg.max_iterations,
         "quality_threshold": cfg.quality_threshold,
+        "context_compress_retries": cfg.context_compress_retries,
+        "keep_tool_results": cfg.keep_tool_results,
     }
 
     with open(CONFIG_PATH, "w") as f:

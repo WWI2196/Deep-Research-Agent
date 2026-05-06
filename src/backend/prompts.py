@@ -89,8 +89,9 @@ Evidence provided below comes in two forms:
 
 Requirements:
 1. Write analytical prose with full paragraphs, not bullet points.
-2. For every substantive claim, mark the source URL inline as: [src: https://example.com]
-   Place the marker immediately after the claim it supports.
+2. After EVERY factual claim, include [src: https://example.com] immediately.
+   Do not batch citations at paragraph end. A claim without [src:] will be treated as unverified.
+   Use the exact URL from the evidence — do not truncate or modify it.
 3. Discuss mechanisms, causation, context, and nuance.
 4. If sources conflict, analyze disagreements.
 5. Include specific data, dates, names where available.
@@ -115,10 +116,10 @@ Sub-agent reports:
 
 Instructions:
 1. For EACH dimension in the research plan, score it on 4 axes (0.0–1.0):
-   - coverage: how comprehensively the dimension is covered
-   - depth: how deep the analysis goes (mechanisms, causation, nuance)
-   - evidence: quality and quantity of sources supporting claims
-   - recency: how current the information is
+   - comprehensiveness: breadth and depth of coverage for this dimension
+   - insight: quality of analysis — mechanisms, causation, nuance, novel connections
+   - evidence: quality and verifiability of sources supporting claims
+   - instruction_following: how precisely the report addresses this dimension's specific requirements
 
 2. Calculate an overall_score as the average across all dimension scores (all axes).
 
@@ -131,7 +132,7 @@ Instructions:
 Return JSON:
 {{
   "dimension_scores": {{
-    "<dimension_name>": {{"coverage": <0.0-1.0>, "depth": <0.0-1.0>, "evidence": <0.0-1.0>, "recency": <0.0-1.0>}}
+    "<dimension_name>": {{"comprehensiveness": <0.0-1.0>, "insight": <0.0-1.0>, "evidence": <0.0-1.0>, "instruction_following": <0.0-1.0>}}
   }},
   "overall_score": <0.0-1.0>,
   "research_complete": <bool>,
@@ -158,6 +159,8 @@ Expected structure: {output_structure}
 Sub-agent reports:
 {subagent_reports}
 
+{failure_summary}
+
 Requirements:
 1. Write 2000–4000 words of flowing analytical prose.
 2. INTEGRATE findings across reports — do NOT just summarize each report separately.
@@ -176,3 +179,24 @@ Structure:
 ## Conclusions
 ## Open Questions
 <<END_OF_REPORT>>"""
+
+FAILURE_SUMMARY = """\
+You are a research quality analyst. Your task is to analyze why a research synthesis
+failed and produce a compact failure summary.
+
+Research topic: "{user_query}"
+Research plan: {research_plan}
+Number of sub-reports available: {reports_count}
+Reason for failure: {reason}
+
+Partial report (last 3000 chars):
+{partial_report}
+
+Generate a structured failure summary (max 250 words) covering:
+1. WHAT HAPPENED: Briefly describe what went wrong during synthesis.
+2. WHAT WAS COVERED: Key themes/topics already addressed in the partial report.
+3. WHAT IS MISSING: Specific sections, topics, or analysis still needed.
+4. REMAINING KEY FINDINGS: Up to 3 critical findings from sub-reports NOT yet included.
+
+Keep the summary compact and actionable. Focus on what the synthesizer needs to produce
+a complete report on retry. Return ONLY the summary text — no JSON or commentary."""

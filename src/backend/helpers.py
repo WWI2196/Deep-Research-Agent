@@ -88,3 +88,40 @@ def enforce_source_diversity(
             domain_count[domain] += 1
             diverse.append(s)
     return diverse
+
+
+def query_similarity(q1: str, q2: str) -> float:
+    """Jaccard similarity between two query strings on word tokens."""
+    words1 = set(q1.lower().split())
+    words2 = set(q2.lower().split())
+    if not words1 or not words2:
+        return 0.0
+    intersection = words1 & words2
+    union = words1 | words2
+    return len(intersection) / len(union)
+
+
+def generate_broader_queries(query: str) -> list[str]:
+    """Generate up to 2 broader variant queries by stripping known modifiers."""
+    modifiers = [
+        "research paper", "study", "pdf", "official", "documentation",
+        "github", "source code", "latest", "market report", "industry analysis",
+        "statistics", "dataset", "analysis", "review", "guide",
+    ]
+    lower_query = query.lower()
+    alternatives: list[str] = []
+    for mod in modifiers:
+        if mod in lower_query:
+            alt = re.sub(re.escape(mod), "", query, flags=re.IGNORECASE).strip()
+            alt = re.sub(r"\s+", " ", alt).strip()
+            if alt and len(alt) > 3 and alt.lower() != lower_query:
+                alternatives.append(alt)
+            if len(alternatives) >= 2:
+                break
+    if not alternatives:
+        words = query.split()
+        if len(words) > 3:
+            alt = " ".join(words[1:])
+            if len(alt) > 3:
+                alternatives.append(alt)
+    return alternatives[:2]

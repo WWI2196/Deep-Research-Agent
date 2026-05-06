@@ -6,7 +6,14 @@ import logging
 from typing import Any
 
 from . import search as search_mod
-from .helpers import enforce_source_diversity, extract_json, normalize_search_item
+from .config import get_config
+from .helpers import (
+    enforce_source_diversity,
+    extract_json,
+    generate_broader_queries,
+    normalize_search_item,
+    query_similarity,
+)
 from .llm import chat
 from .prompts import SOURCE_EVALUATE, SUBAGENT_REPORT
 
@@ -58,7 +65,7 @@ def generate_search_queries(subtask: dict[str, Any]) -> list[str]:
             if mod not in kw.lower():
                 queries.append(f"{kw} {mod}")
 
-    # Deduplicate, limit 10
+    # Exact deduplicate
     seen: set[str] = set()
     deduped: list[str] = []
     for q in queries:
@@ -66,9 +73,19 @@ def generate_search_queries(subtask: dict[str, Any]) -> list[str]:
             seen.add(q)
             deduped.append(q)
 
-    logger.info("Generated %d search queries from %d keywords for subtask %s",
-                len(deduped[:10]), len(keywords), subtask.get("id", "?"))
-    return deduped[:10]
+    # Fuzzy deduplicate: collapse near-identical queries
+    fuzzy_deduped: list[str] = []
+    for q in deduped:
+        is_dup = any(
+            query_similarity(q, existing) >= 0.85
+            for existing in fuzzy_deduped
+        )
+        if not is_dup:
+            fuzzy_deduped.append(q)
+
+    logger.info("Generated %d search queries (fuzzy dedup from %d) for subtask %s",
+                len(fuzzy_deduped[:10]), len(deduped), subtask.get("id", "?"))
+    return fuzzy_deduped[:10]
 
 
 async def batch_evaluate_sources(
@@ -158,23 +175,46 @@ async def run_subagent(
     research_plan: str,
     subtask: dict[str, Any],
     tool_budget: int,
+    query_cache: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     sid = subtask["id"]
     stitle = subtask["title"]
+    if query_cache is None:
+        query_cache = {}
 
     # 1 — generate queries (rules-based, no LLM call)
     queries = generate_search_queries(subtask)
 
-    # 2 — parallel search
+    # 2 — parallel search with query cache + empty-result rollback
     search_queries = queries[: max(1, min(10, tool_budget))]
 
-    async def _search_one(q: str) -> dict[str, Any] | None:
+    async def _search_one_cached(q: str) -> dict[str, Any] | None:
+        if q in query_cache:
+            logger.info("Query cache HIT for '%s' (subtask %s)", q[:60], sid)
+            return query_cache[q]
         try:
-            return await asyncio.to_thread(search_mod.search, q, limit=8)
+            result = await asyncio.to_thread(search_mod.search, q, limit=8)
+            query_cache[q] = result if result else {"data": []}
+
+            if result is not None and not result.get("data"):
+                broader = generate_broader_queries(q)
+                for bq in broader:
+                    if bq not in query_cache:
+                        bq_result = await asyncio.to_thread(
+                            search_mod.search, bq, limit=8
+                        )
+                        query_cache[bq] = bq_result if bq_result else {"data": []}
+                        if bq_result and bq_result.get("data"):
+                            logger.info(
+                                "Empty-result rollback: broader '%s' -> %d results",
+                                bq, len(bq_result["data"]),
+                            )
+                            return bq_result
+            return result
         except Exception:
             return None
 
-    tasks = [_search_one(q) for q in search_queries]
+    tasks = [_search_one_cached(q) for q in search_queries]
     search_results = await asyncio.gather(*tasks)
 
     raw_candidates: list[dict[str, Any]] = []
@@ -193,7 +233,7 @@ async def run_subagent(
     # 3b — adaptive query refinement
     refined_queries = await _refine_queries_if_needed(subtask, scored, queries)
     if refined_queries:
-        refined_tasks = [_search_one(q) for q in refined_queries]
+        refined_tasks = [_search_one_cached(q) for q in refined_queries]
         refined_results = await asyncio.gather(*refined_tasks)
         for sr in refined_results:
             if not sr or not sr.get("data"):
@@ -270,15 +310,49 @@ async def run_subagent(
         if not url or url not in top_urls:
             continue
         if url in extracted_map:
-            evidence.append({"url": url, "data": f"[FULL-TEXT] {extracted_map[url]}"})
+            evidence.append({
+                "url": url, "data": f"[FULL-TEXT] {extracted_map[url]}",
+                "score": s.get("quality_score", 0.2),
+            })
         else:
             snippet = s.get("description") or s.get("title", "")
             if snippet:
-                evidence.append({"url": url, "data": f"[SNIPPET] {snippet}"})
+                evidence.append({
+                    "url": url, "data": f"[SNIPPET] {snippet}",
+                    "score": s.get("quality_score", 0.2),
+                })
+
+    # Compress: keep only top N tool results by quality score
+    cfg = get_config()
+    keep_n = cfg.keep_tool_results
+    if keep_n > 0 and len(evidence) > keep_n:
+        evidence.sort(key=lambda x: x.get("score", 0.2), reverse=True)
+        evidence = evidence[:keep_n]
+        logger.info("Compressed evidence from %d to %d items (keep_tool_results=%d)",
+                     len(filtered), keep_n, keep_n)
+
+    # Truncate each evidence item to keep context manageable
+    max_evidence_per_item = 3000
+    for e in evidence:
+        if len(e["data"]) > max_evidence_per_item:
+            e["data"] = e["data"][:max_evidence_per_item] + "\n...[truncated]"
 
     evidence_text = "\n\n".join(f"[From {e['url']}]: {e['data']}" for e in evidence)
 
-    # 6 — write report (retry once if too short)
+    def _retry_hint(attempt: int, prev_report: str) -> str:
+        if attempt == 0:
+            return ""
+        hints = []
+        if len(prev_report) < 200:
+            hints.append("YOUR PREVIOUS RESPONSE WAS EMPTY OR TOO SHORT.")
+        if "[src:" not in prev_report:
+            hints.append("YOUR PREVIOUS RESPONSE HAD NO [src: url] CITATIONS. "
+                         "Every factual claim MUST be followed by [src: <url>] immediately.")
+        if not hints:
+            return ""
+        return "\n\n" + " ".join(hints) + " Write a complete 800-1500 word report with proper citations."
+
+    # 6 — write report (retry once if too short or missing citations)
     report = ""
     for attempt in range(2):
         report = await chat(
@@ -299,13 +373,10 @@ async def run_subagent(
                 ),
             }, {
                 "role": "user",
-                "content": f"Evidence:\n{evidence_text}" + (
-                    "\n\nYOUR PREVIOUS RESPONSE WAS EMPTY OR TOO SHORT. Write a complete 800-1500 word report."
-                    if attempt > 0 and len(report) < 200 else ""
-                ),
+                "content": f"Evidence:\n{evidence_text}" + _retry_hint(attempt, report),
             }],
         )
-        if len(report) >= 200:
+        if len(report) >= 200 and "[src:" in report:
             break
     if len(report) < 200:
         report = f"# {stitle}\n\n## Summary\n\nResearch on this subtask was not completed. Evidence collected: {len(evidence)} sources.\n\n## Sources\n\n" + "\n".join(
@@ -326,9 +397,14 @@ async def run_subagents_parallel(
     research_plan: str,
     subtasks: list[dict[str, Any]],
     tool_calls_per_subagent: int,
+    query_cache: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
+    if query_cache is None:
+        query_cache = {}
+
     tasks = [
-        run_subagent(user_query, research_plan, st, tool_calls_per_subagent)
+        run_subagent(user_query, research_plan, st, tool_calls_per_subagent,
+                     query_cache=query_cache)
         for st in subtasks
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)

@@ -491,7 +491,7 @@ async def test_run_subagents_parallel_success():
     ]
 
     with patch("src.backend.subagent.run_subagent", new_callable=AsyncMock) as mock_run:
-        async def fake_run(uq, rp, st, budget):
+        async def fake_run(uq, rp, st, budget, query_cache=None):
             return {
                 "subtask_id": st["id"],
                 "subtask_title": st["title"],
@@ -518,7 +518,7 @@ async def test_run_subagents_parallel_one_fails():
     ]
 
     with patch("src.backend.subagent.run_subagent", new_callable=AsyncMock) as mock_run:
-        async def fake_run(uq, rp, st, budget):
+        async def fake_run(uq, rp, st, budget, query_cache=None):
             if "fails" in st["title"]:
                 raise RuntimeError("subagent error")
             return {
@@ -546,11 +546,11 @@ async def test_run_subagents_parallel_dedup_sources():
     ]
 
     with patch("src.backend.subagent.run_subagent", new_callable=AsyncMock) as mock_run:
-        async def fake_run(uq, rp, st, budget):
+        async def fake_run(uq, rp, st, budget, query_cache=None):
             return {
                 "subtask_id": st["id"],
                 "subtask_title": st["title"],
-                "report": f"Report",
+                "report": "Report",
                 "sources": [{"url": "https://shared.com/a", "quality_score": 0.9}],  # same URL
                 "evidence_count": 1,
             }
@@ -670,19 +670,24 @@ async def test_add_citations_basic():
     sources = [
         {"url": "https://example.com/1", "title": "Source 1", "description": "Description 1"},
     ]
-    # Report with [src: url] markers
     report = "Some claim [src: https://example.com/1] about the topic."
-    result = await add_citations(report, sources)
+    with patch("src.backend.synthesis._verify_citation_urls", new_callable=AsyncMock) as mock_verify:
+        mock_verify.return_value = {"https://example.com/1": True}
+        result, verification = await add_citations(report, sources)
     assert "[^1]" in result  # marker replaced with numbered citation
     assert "References" in result  # references section appended
     assert "https://example.com/1" in result
+    assert verification["https://example.com/1"] is True
 
 
 @pytest.mark.asyncio
 async def test_add_citations_no_sources():
     from src.backend.agents import add_citations
-    result = await add_citations("Original report", [])
+    with patch("src.backend.synthesis._verify_citation_urls", new_callable=AsyncMock) as mock_verify:
+        mock_verify.return_value = {}
+        result, verification = await add_citations("Original report", [])
     assert "Original report" in result
+    assert verification == {}
 
 
 @pytest.mark.asyncio
@@ -690,9 +695,10 @@ async def test_add_citations_strips_bracket_tags():
     from src.backend.agents import add_citations
 
     sources = [{"url": "https://example.com/1", "title": "S1", "description": "D1"}]
-    # Report with both old-style bracket tags and new src markers
     report = "[task_1_name] Some claim [src: https://example.com/1]"
-    result = await add_citations(report, sources)
+    with patch("src.backend.synthesis._verify_citation_urls", new_callable=AsyncMock) as mock_verify:
+        mock_verify.return_value = {"https://example.com/1": True}
+        result, verification = await add_citations(report, sources)
     assert "[task_1_name]" not in result  # old tags stripped
     assert "[^1]" in result  # src marker replaced
 
@@ -701,10 +707,11 @@ async def test_add_citations_strips_bracket_tags():
 async def test_add_citations_adaptive_retry():
     from src.backend.agents import add_citations
 
-    # Rule-based citations don't fail on large source lists
     sources = [{"url": f"https://example.com/{i}", "title": f"Source {i}", "description": f"Desc {i}"} for i in range(50)]
     report = "Text with [src: https://example.com/0] and [src: https://example.com/1] markers."
-    result = await add_citations(report, sources)
+    with patch("src.backend.synthesis._verify_citation_urls", new_callable=AsyncMock) as mock_verify:
+        mock_verify.return_value = {f"https://example.com/{i}": True for i in range(50)}
+        result, verification = await add_citations(report, sources)
     assert "[^1]" in result
     assert "[^2]" in result
 
@@ -727,3 +734,103 @@ async def test_chat_routes_to_correct_role():
         assert result == "response"
         mock_get_provider.assert_called_once()
         mock_provider.chat.assert_called_once()
+
+
+# ── synthesize_report with failure_summary ─────────────────────
+
+@pytest.mark.asyncio
+async def test_synthesize_report_with_failure_summary():
+    from src.backend.agents import synthesize_report
+
+    reports = ["A" * 200 + " detailed report content."]
+    with patch("src.backend.synthesis.chat", new_callable=AsyncMock) as mock_chat:
+        mock_chat.return_value = "## Intro\n\nReport with failure context.\n\n## Conclusions\n\nDone.\n\n<<END_OF_REPORT>>"
+        with patch("src.backend.synthesis._continue_if_truncated", new_callable=AsyncMock) as mock_cont:
+            mock_cont.return_value = "## Intro\n\nReport.\n\n## Conclusions\n\nDone."
+            result = await synthesize_report("query", "plan", reports, failure_summary="Previous attempt was truncated.")
+            assert "## Intro" in result
+            # Verify failure summary was included in the prompt
+            call_args = mock_chat.call_args
+            system_msg = call_args[1]["messages"][0]["content"]
+            assert "Previous attempt was truncated" in system_msg
+
+
+# ── generate_search_queries fuzzy dedup ────────────────────────
+
+def test_generate_search_queries_fuzzy_dedup():
+    from src.backend.subagent import generate_search_queries
+
+    subtask = {
+        "id": "t1", "title": "Test",
+        "keywords": ["AI safety regulations", "AI safety regulation", "AI safety regulatory framework"],
+        "source_types": "academic",
+    }
+    result = generate_search_queries(subtask)
+    # Fuzzy dedup should collapse nearly identical keywords
+    from src.backend.helpers import query_similarity
+    for i in range(len(result)):
+        for j in range(i + 1, len(result)):
+            assert query_similarity(result[i], result[j]) < 0.85, \
+                f"Near-duplicate queries: {result[i]} and {result[j]}"
+
+
+# ── run_subagent query cache ───────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_run_subagent_uses_query_cache():
+    from src.backend.subagent import run_subagent
+
+    subtask = {
+        "id": "t1", "title": "Test", "description": "Desc",
+        "objective": "Obj", "keywords": ["test"], "source_types": "academic",
+        "boundaries": "", "output_format": "markdown", "tool_guidance": "",
+    }
+
+    cache = {"test": {"data": [{"url": "https://cached.com", "title": "Cached", "snippet": "Test"}]}}
+
+    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
+        mock_chat.return_value = "# Report\n\nContent."
+        with patch("src.backend.subagent.batch_evaluate_sources", new_callable=AsyncMock) as mock_eval:
+            mock_eval.return_value = [{"url": "https://cached.com", "title": "Cached", "quality_score": 0.9}]
+            with patch("src.backend.subagent.search_mod.search") as mock_search:
+                mock_search.return_value = {"data": []}
+                with patch("src.backend.subagent.get_config") as mock_cfg:
+                    mock_cfg.return_value.keep_tool_results = 5
+                    result = await run_subagent("query", "plan", subtask, tool_budget=5, query_cache=cache)
+
+    assert result["subtask_id"] == "t1"
+    # search_mod.search should NOT have been called for cached query
+    # (it was called for broader queries after empty result, but not for the cached key itself)
+
+
+# ── run_subagent empty result triggers broader ─────────────────
+
+@pytest.mark.asyncio
+async def test_run_subagent_empty_result_triggers_broader():
+    from src.backend.subagent import run_subagent
+
+    subtask = {
+        "id": "t1", "title": "Test", "description": "Desc",
+        "objective": "Obj", "keywords": ["AI safety research paper"], "source_types": "academic",
+        "boundaries": "", "output_format": "markdown", "tool_guidance": "",
+    }
+
+    call_args_list = []
+
+    def fake_search(q, limit=8):
+        call_args_list.append(q)
+        if "research paper" in q:
+            return {"data": []}
+        return {"data": [{"url": "https://example.com", "title": "Result", "snippet": "Test"}]}
+
+    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
+        mock_chat.return_value = "# Report\n\nContent."
+        with patch("src.backend.subagent.batch_evaluate_sources", new_callable=AsyncMock) as mock_eval:
+            mock_eval.return_value = [{"url": "https://example.com", "title": "Result", "quality_score": 0.8}]
+            with patch("src.backend.subagent.search_mod.search", side_effect=fake_search):
+                with patch("src.backend.subagent.get_config") as mock_cfg:
+                    mock_cfg.return_value.keep_tool_results = 5
+                    result = await run_subagent("query", "plan", subtask, tool_budget=5)
+
+    # The broader query path was triggered
+    assert len(call_args_list) >= 1

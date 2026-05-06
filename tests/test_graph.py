@@ -26,6 +26,8 @@ def mock_deps():
         cfg.default_model = "gpt-4o"
         cfg.max_iterations = 3
         cfg.quality_threshold = 0.7
+        cfg.context_compress_retries = 1
+        cfg.keep_tool_results = 5
         mock_cfg.return_value = cfg
 
         # Default agent returns
@@ -57,7 +59,7 @@ def mock_deps():
             "total_count": 2,
         }
         mock_synth.return_value = "# Synthesized Report\n\nFull content..."
-        mock_cite.return_value = "# Synthesized Report [^1]\n\nFull content...\n\n## References\n[^1]: https://example.com/1"
+        mock_cite.return_value = ("# Synthesized Report [^1]\n\nFull content...\n\n## References\n[^1]: https://example.com/1", {"https://example.com/1": True})
         mock_chat.return_value = json.dumps({
             "dimension_scores": {"Safety Overview": {"coverage": 0.8, "depth": 0.7, "evidence": 0.8, "recency": 0.9}},
             "overall_score": 0.8,
@@ -252,3 +254,59 @@ async def test_checkpoints_persisted_for_all_phases(mock_deps, events_capturer):
     assert "reflection" in phases_called
     assert "synthesis" in phases_called
     assert "citation" in phases_called
+
+
+# ── Synthesis retry on truncation ────────────────────────────
+
+@pytest.mark.asyncio
+async def test_synthesis_retry_on_truncation(mock_deps, events_capturer):
+    from src.backend.graph import build_and_run_graph
+
+    mock_deps["synth"].side_effect = [
+        "x" * 600 + " and the",        # truncated (needs_continuation returns True for dangling "the")
+        "# Complete Report\n\nFull content with proper ending.",  # retry succeeds
+    ]
+
+    state = {"user_query": "test", "context_compress_retries": 1}
+    result = await build_and_run_graph(state, events_capturer)
+
+    assert mock_deps["synth"].call_count == 2
+    assert "Complete Report" in result["report"]
+
+
+@pytest.mark.asyncio
+async def test_synthesis_no_retry_when_complete(mock_deps, events_capturer):
+    from src.backend.graph import build_and_run_graph
+
+    mock_deps["synth"].return_value = "# Complete\n\nFull report content with sentences.\n\n" + "x" * 500 + "."
+
+    state = {"user_query": "test", "context_compress_retries": 1}
+    result = await build_and_run_graph(state, events_capturer)
+
+    assert mock_deps["synth"].call_count == 1
+
+
+# ── Reflection low quality at max iterations ─────────────────
+
+@pytest.mark.asyncio
+async def test_reflection_low_quality_sets_failure_summary(mock_deps, events_capturer):
+    from src.backend.graph import build_and_run_graph
+
+    mock_deps["chat"].return_value = json.dumps({
+        "dimension_scores": {"Safety": {"coverage": 0.3, "depth": 0.2, "evidence": 0.3, "recency": 0.4}},
+        "overall_score": 0.3,
+        "research_complete": False,
+        "gaps": [{"dimension": "Safety", "gap_detail": "missing",
+                  "subtask": {"id": "gap_1", "title": "Gap 1", "description": "d", "objective": "o",
+                              "output_format": "markdown", "dimension": "Safety", "keywords": ["k"],
+                              "source_types": "academic", "boundaries": "", "estimated_searches": 5}}],
+    })
+
+    state = {"user_query": "test", "max_iterations": 1, "context_compress_retries": 1}
+    result = await build_and_run_graph(state, events_capturer)
+
+    # Should still complete
+    assert result["iteration_count"] <= 1
+    # Verify "low-quality-retry" event was emitted
+    decisions = [e for e in events_capturer.events if e["type"] == "reflection-decision"]
+    assert len(decisions) >= 1

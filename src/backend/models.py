@@ -34,6 +34,8 @@ class ResearchRequest(BaseModel):
     query: str
     max_iterations: int | None = None
     quality_threshold: float | None = None
+    context_compress_retries: int | None = None
+    keep_tool_results: int | None = None
     provider: str | None = None
     model: str | None = None
 
@@ -48,6 +50,8 @@ class ConfigUpdateRequest(BaseModel):
     default_model: str | None = None
     max_iterations: int | None = None
     quality_threshold: float | None = None
+    context_compress_retries: int | None = None
+    keep_tool_results: int | None = None
     roles: dict[str, dict[str, str]] | None = None
 
 
@@ -71,3 +75,8 @@ class ResearchState(TypedDict, total=False):
     memory: dict[str, Any]
     quality_threshold: float
     current_quality_score: float
+    synthesis_retry_count: int
+    synthesis_failure_summary: str
+    context_compress_retries: int
+    keep_tool_results: int
+    query_cache: dict[str, list[dict[str, Any]]]
