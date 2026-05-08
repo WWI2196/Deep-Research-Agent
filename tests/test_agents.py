@@ -796,6 +796,10 @@ async def test_run_subagent_uses_query_cache():
                 mock_search.return_value = {"data": []}
                 with patch("src.backend.subagent.get_config") as mock_cfg:
                     mock_cfg.return_value.keep_tool_results = 5
+                    mock_cfg.return_value.max_evidence_tokens = 8000
+                    mock_cfg.return_value.max_evidence_per_item = 3000
+                    mock_cfg.return_value.source_type_quotas = {"document": 3, "web": 8}
+                    mock_cfg.return_value.min_source_per_type = {"document": 1, "web": 2}
                     result = await run_subagent("query", "plan", subtask, tool_budget=5, query_cache=cache)
 
     assert result["subtask_id"] == "t1"
@@ -830,6 +834,10 @@ async def test_run_subagent_empty_result_triggers_broader():
             with patch("src.backend.subagent.search_mod.search", side_effect=fake_search):
                 with patch("src.backend.subagent.get_config") as mock_cfg:
                     mock_cfg.return_value.keep_tool_results = 5
+                    mock_cfg.return_value.max_evidence_tokens = 8000
+                    mock_cfg.return_value.max_evidence_per_item = 3000
+                    mock_cfg.return_value.source_type_quotas = {"document": 3, "web": 8}
+                    mock_cfg.return_value.min_source_per_type = {"document": 1, "web": 2}
                     result = await run_subagent("query", "plan", subtask, tool_budget=5)
 
     # The broader query path was triggered
@@ -908,7 +916,7 @@ async def test_add_citations_appends_uncited_sources():
 
     assert "[^1]" in result
     assert "Web Source" in result
-    # Uncited file:// source should appear in additional sources section
-    assert "Doc Source" in result
-    assert "file:///Users/eureka/docs/doc1.md" in result
-    assert "Additional sources" in result or "Document Library" in result
+    # Uncited sources are no longer appended as an additional section
+    assert "Doc Source" not in result
+    assert "file:///Users/eureka/docs/doc1.md" not in result
+    assert "Additional sources" not in result

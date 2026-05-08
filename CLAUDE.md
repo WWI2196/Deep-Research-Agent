@@ -11,9 +11,8 @@ uv sync --group dev                        # include dev deps (pytest, ruff, myp
 uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787  # start server
 
 # Tests
-uv run pytest tests/ -v                    # backend tests (194)
+uv run pytest tests/ -v                    # backend tests
 uv run pytest tests/test_agents.py -v      # single test file
-npx vitest run                             # frontend tests (49)
 
 # Lint & type check
 uv run ruff check src/                     # lint
@@ -53,9 +52,8 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
   - **New**: `library.js` — 文档库管理页面（创建/删除/上传/重索引）
   - **New**: `log-viewer.js` — Debug log viewer with phase/type filters, search, expandable details, and LLM-call latency display. Attachable to report page and history rows.
   - Infrastructure: `app.js` (router + page lifecycle), `api.js` (HTTP+SSE), `store.js` (`createStore()` event-driven state)
-- `tests/` — pytest suite (194 backend + 49 frontend vitest)
+- `tests/` — pytest suite (194 backend tests)
   - `test_providers/` — Provider tests (anthropic, openai_compatible, factory)
-  - `frontend/` — Vitest + jsdom frontend tests (store, format, markdown)
   - **New**: `test_document_store.py` — DocumentStore CRUD + 混合检索测试
   - **New**: `test_tracing.py` — Tracing contextvar and trace log level filtering tests
 
@@ -142,6 +140,6 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 
 - SearXNG must be running for search to work (`docker compose up -d` in `~/searxng/`)
 - Start server with `uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787`, then open `http://127.0.0.1:8787` in browser
-- All changes must maintain 194 Python + 49 frontend tests passing
+- All changes must maintain 194 Python tests passing
 - trafilatura is the only content extraction method — no paid alternatives
 - `save_config()` must preserve `providers` and other unmanaged sections in config.yaml

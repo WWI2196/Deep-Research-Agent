@@ -114,13 +114,23 @@ function createStore() {
   }
 
   function getPhaseSteps() {
-    const seen = new Set();
-    return PHASE_ORDER.map(phase => {
+    const cp = _state.currentPhase || '';
+    // Map backend checkpoint names to frontend phase ids
+    const phaseMap = {
+      'subagents': 'subagents', 'subagents_0': 'subagents', 'subagents_1': 'subagents', 'subagents_2': 'subagents',
+      'synthesis': 'synthesize', 'citation': 'cite',
+    };
+    const mappedCurrent = phaseMap[cp] || cp;
+    const currentIndex = PHASE_ORDER.indexOf(mappedCurrent);
+
+    return PHASE_ORDER.map((phase, idx) => {
       let status = 'pending';
       if (_state.complete) {
         status = 'completed';
-      } else if (phase === _state.currentPhase) {
+      } else if (phase === mappedCurrent) {
         status = 'active';
+      } else if (currentIndex >= 0 && idx < currentIndex) {
+        status = 'completed';
       }
       return { id: phase, label: PHASE_LABELS[phase] || phase, status };
     });

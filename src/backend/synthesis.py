@@ -379,12 +379,12 @@ async def add_citations(
         if u and u not in source_by_url:
             source_by_url[u] = s
 
-    # Build References section
+    # Build References section — use bold labels so all markdown renderers show them
     refs = "\n\n## References\n\n"
     for url, idx in sorted(seen.items(), key=lambda x: x[1]):
         src = source_by_url.get(url, {})
         title = src.get("title", "") or _domain_from_url(url)
-        refs += f"[^{idx}]: [{title}]({url})\n"
+        refs += f"**[{idx}]** [{title}]({url})\n"
 
     cited_report += refs
 
@@ -409,33 +409,6 @@ async def add_citations(
     accessible = total - unverified_count
     footer = f"\n\n---\n*Citation check: {accessible}/{total} URLs accessible*"
     cited_report += footer
-
-    # Recovery: append sources that were used by sub-agents but dropped by synthesis
-    _cited_normalized = set(seen.keys())
-    uncited: list[dict[str, Any]] = []
-    for s in sources:
-        u = _normalize_url(s.get("url", ""))
-        if u and u not in _cited_normalized:
-            uncited.append(s)
-
-    if uncited:
-        doc_uncited = [s for s in uncited if str(s.get("url", "")).startswith("file://")]
-        web_uncited = [s for s in uncited if not str(s.get("url", "")).startswith("file://")]
-        extra = "\n\n---\n*Additional sources used by sub-agents but not directly cited above:*\n"
-        if doc_uncited:
-            extra += "\n**Document Library**\n"
-            for s in doc_uncited:
-                url = s.get("url", "")
-                title = s.get("title", "") or _domain_from_url(url)
-                extra += f"- [{title}]({url})\n"
-        if web_uncited:
-            extra += "\n**Web Sources**\n"
-            for s in web_uncited:
-                url = s.get("url", "")
-                title = s.get("title", "") or _domain_from_url(url)
-                extra += f"- [{title}]({url})\n"
-        cited_report += extra
-        logger.info("Recovered %d uncited sources in References", len(uncited))
 
     return cited_report, verification
 

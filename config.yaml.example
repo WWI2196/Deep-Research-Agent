@@ -43,3 +43,14 @@ research:
   max_sources_per_domain: 3
   tool_calls_per_subagent: 15
   log_level: debug
+  # 上下文管理
+  keep_tool_results: 3              # 每 subagent 最少保留证据条数
+  max_evidence_tokens: 8000         # 单 subagent 证据总 token 预算
+  max_evidence_per_item: 3000       # 单条证据最大字符数
+  # 来源配额（防止文档来源挤占网络来源）
+  source_type_quotas:
+    document: 3
+    web: 8
+  min_source_per_type:
+    document: 1
+    web: 2

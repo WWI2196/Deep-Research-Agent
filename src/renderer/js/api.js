@@ -31,6 +31,72 @@ async function startResearchApi(query, depth, provider, model, documentCollectio
   });
 }
 
+function startResearchStream(query, depth, provider, model, documentCollections, onEvent, onError, onDone) {
+  const body = JSON.stringify({
+    query,
+    max_iterations: depth,
+    provider: provider || undefined,
+    model: model || undefined,
+    document_collections: documentCollections || undefined,
+  });
+
+  // Native EventSource doesn't support POST body; use fetch + ReadableStream instead
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const res = await fetch(`${BASE()}/api/research/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }));
+        onError(new Error(err.detail || `HTTP ${res.status}`));
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        let currentEvent = null;
+        let currentData = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            currentData += line.slice(6);
+          } else if (line === '' && currentData !== '') {
+            try {
+              const payload = JSON.parse(currentData);
+              // Backend only sends 'data:' lines; read type from JSON payload
+              const evtType = currentEvent || payload.type || 'log';
+              onEvent({ type: evtType, ...payload });
+            } catch {
+              // ignore malformed line
+            }
+            currentEvent = null;
+            currentData = '';
+          }
+        }
+      }
+      onDone();
+    } catch (err) {
+      if (err.name !== 'AbortError') onError(err);
+    }
+  })();
+
+  return controller;
+}
+
 async function fetchRunStatus(runId) {
   return apiGet(`/api/research/${runId}/status`);
 }

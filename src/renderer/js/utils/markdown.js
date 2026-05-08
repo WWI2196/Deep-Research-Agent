@@ -14,6 +14,11 @@ function renderMarkdown(text) {
     content = content.replace(/^```(?:\w+)?\s*\n?/, '').replace(/\n?```\s*$/, '');
   }
 
+  // Escape footnote markers so marked.js doesn't treat them as reference links
+  // and swallow the definition lines from the References section.
+  content = content.replace(/^\[\^(\d+)\]:\s+/gm, '**[$1]** ');
+  content = content.replace(/\[\^(\d+)\](?!:)/g, '<sup>[$1]</sup>');
+
   try {
     return marked.parse(content);
   } catch {

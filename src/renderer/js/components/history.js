@@ -54,6 +54,8 @@ async function deleteHistoryItem(event, runId) {
   event.stopPropagation();
   if (!confirm('Delete this research record?')) return;
   try {
+    // If still running, cancel first
+    try { await cancelResearch(runId); } catch { /* ignore if not running */ }
     await deleteHistory(runId);
     initHistoryPage();
   } catch {
@@ -70,6 +72,7 @@ window.viewHistoryProcess = function(runId) {
   store.set('currentRunId', runId);
   store.set('running', true);
   store.set('complete', false);
+  store.set('startTime', Date.now());
   navigateTo('dashboard');
 };
 

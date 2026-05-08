@@ -1,7 +1,7 @@
 """Pure text and JSON utility helpers — no LLM or external dependencies."""
 
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Any
 from urllib.parse import urlparse
 
@@ -103,6 +103,96 @@ def query_similarity(q1: str, q2: str) -> float:
     intersection = words1 & words2
     union = words1 | words2
     return len(intersection) / len(union)
+
+
+def enforce_source_type_quota(
+    sources: list[dict[str, Any]],
+    quotas: dict[str, int] | None = None,
+    min_per_type: dict[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    """Enforce per-source-type quotas and minimums while preserving quality ordering.
+
+    Default quotas: document=3, web=8. Default minimums: document=1, web=2.
+    """
+    quotas = quotas if isinstance(quotas, dict) else {"document": 3, "web": 8}
+    min_per_type = min_per_type if isinstance(min_per_type, dict) else {"document": 1, "web": 2}
+
+    by_type: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for s in sources:
+        stype = s.get("source", "web")
+        by_type[stype].append(s)
+
+    result: list[dict[str, Any]] = []
+    taken: dict[str, int] = {k: 0 for k in quotas}
+    taken["other"] = 0
+
+    # Phase 1 — satisfy minimums per type
+    for stype, minimum in min_per_type.items():
+        items = by_type.get(stype, [])
+        for item in items[:minimum]:
+            result.append(item)
+            taken[stype] = taken.get(stype, 0) + 1
+
+    # Phase 2 — fill remaining slots up to quotas, then overflow into global pool
+    overflow: list[dict[str, Any]] = []
+    for stype, items in by_type.items():
+        already = sum(1 for r in result if r.get("source", "web") == stype)
+        quota = quotas.get(stype, len(items))
+        for item in items[already:]:
+            if taken.get(stype, 0) < quota:
+                result.append(item)
+                taken[stype] = taken.get(stype, 0) + 1
+            else:
+                overflow.append(item)
+
+    # Phase 3 — append overflow items sorted by quality_score
+    overflow.sort(key=lambda x: x.get("quality_score", 0.0), reverse=True)
+    result.extend(overflow)
+    return result
+
+
+def smart_truncate(text: str, max_chars: int) -> str:
+    """Truncate text at a natural boundary (section, paragraph, sentence).
+
+    Prefers preserving whole sections (## headers) or paragraphs.
+    Falls back to sentence boundary, then word boundary.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    # Try section boundary (markdown ## headers)
+    sections = re.split(r"\n## ", text)
+    if len(sections) > 1:
+        result = sections[0]
+        for sec in sections[1:]:
+            candidate = result + "\n## " + sec
+            if len(candidate) > max_chars * 0.95:
+                break
+            result = candidate
+        return result + "\n\n...[truncated]"
+
+    # Try paragraph boundary
+    truncate_at = text.rfind("\n\n", 0, max_chars - 20)
+    if truncate_at == -1:
+        truncate_at = text.rfind("\n", 0, max_chars - 20)
+
+    # Try sentence boundary
+    if truncate_at == -1:
+        truncate_at = text.rfind(". ", 0, max_chars - 20)
+
+    # Fallback to word boundary
+    if truncate_at == -1:
+        truncate_at = text.rfind(" ", 0, max_chars - 20)
+
+    if truncate_at == -1:
+        truncate_at = max_chars - 20
+
+    return text[:truncate_at] + "\n\n...[truncated]"
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate: chars / 3 (good enough for budgeting)."""
+    return len(text) // 3
 
 
 def generate_broader_queries(query: str) -> list[str]:

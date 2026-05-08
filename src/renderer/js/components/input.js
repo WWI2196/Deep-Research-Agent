@@ -5,6 +5,8 @@ let selectedProvider = '';
 let selectedModel = '';
 let _selectedCollections = [];
 
+let _streamController = null;
+
 async function startResearch() {
   const query = document.getElementById('query-input').value.trim();
   if (!query) return;
@@ -17,16 +19,34 @@ async function startResearch() {
   store.set('running', true);
   store.set('startTime', Date.now());
 
-  try {
-    const result = await startResearchApi(query, inputDepth, selectedProvider, selectedModel, _selectedCollections);
-    store.set('currentRunId', result.run_id);
-    navigateTo('dashboard');
-  } catch (err) {
-    errorEl.textContent = err.message || 'Failed to start research';
-    errorEl.style.display = 'block';
-    document.getElementById('btn-start').disabled = false;
-    store.set('running', false);
-  }
+  if (_streamController) { _streamController.abort(); _streamController = null; }
+
+  _streamController = startResearchStream(
+    query, inputDepth, selectedProvider, selectedModel, _selectedCollections,
+    (evt) => {
+      if (evt.run_id && !store.get('currentRunId')) {
+        store.set('currentRunId', evt.run_id);
+      }
+      handleResearchEvent(evt);
+      if (evt.type === 'complete' || evt.type === 'error') {
+        _streamController = null;
+        document.getElementById('btn-start').disabled = false;
+      }
+    },
+    (err) => {
+      errorEl.textContent = err.message || 'Failed to start research';
+      errorEl.style.display = 'block';
+      document.getElementById('btn-start').disabled = false;
+      store.set('running', false);
+      _streamController = null;
+    },
+    () => {
+      document.getElementById('btn-start').disabled = false;
+      _streamController = null;
+    }
+  );
+
+  navigateTo('dashboard');
 }
 
 async function loadRecent() {

@@ -17,7 +17,7 @@ A multi-agent deep research system that plans, searches, reads, reflects, and sy
 - **Real-time SSE streaming**: all pipeline events pushed to frontend via `POST /api/research/stream`
 - **Multi-provider LLM routing**: 7 roles can use different models; 6 built-in providers (mimo, openai, anthropic, gemini, deepseek, openrouter)
 - **SQLite persistence**: runs, checkpoints, sources, reports stored locally at `~/.deep-research/history.db`
-- **205 tests**: 156 pytest + 49 vitest/jsdom frontend tests
+- **156 backend tests**: pytest suite covering pipeline, agents, search, providers, server, persistence
 
 ## Architecture
 
@@ -179,8 +179,7 @@ rules-based query generation (keywords × source_type modifiers)
 ## Testing
 
 ```bash
-uv run pytest tests/ -v    # 156 backend tests
-npx vitest run             # 49 frontend tests
+uv run pytest tests/ -v    # backend tests
 ```
 
 | Module | Tests |
@@ -195,8 +194,7 @@ npx vitest run             # 49 frontend tests
 | providers/ | 20 |
 | export.py | 3 |
 | integration | 3 |
-| frontend (vitest) | 49 |
-| **Total** | **205** |
+| **Total** | **156** |
 
 ## Tech Stack
 
@@ -208,7 +206,7 @@ npx vitest run             # 49 frontend tests
 | Extraction | trafilatura |
 | LLM | OpenRouter / OpenAI-compatible / Anthropic |
 | Storage | SQLite |
-| Testing | pytest, pytest-asyncio, vitest + jsdom |
+| Testing | pytest, pytest-asyncio |
 | Package | uv (pyproject.toml) |
 
 ## License

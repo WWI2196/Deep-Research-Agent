@@ -9,10 +9,13 @@ from . import search as search_mod
 from .config import get_config
 from .helpers import (
     enforce_source_diversity,
+    enforce_source_type_quota,
+    estimate_tokens,
     extract_json,
     generate_broader_queries,
     normalize_search_item,
     query_similarity,
+    smart_truncate,
 )
 from .llm import chat
 from .prompts import SOURCE_EVALUATE, SUBAGENT_REPORT
@@ -298,8 +301,15 @@ async def run_subagent(
         scored = await batch_evaluate_sources(raw_candidates, subtask.get("objective", user_query))
         scored.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
 
-    # 3c — enforce source diversity
+    cfg = get_config()
+
+    # 3c — enforce source diversity + source-type quotas
     scored = enforce_source_diversity(scored, max_per_domain=3)
+    scored = enforce_source_type_quota(
+        scored,
+        quotas=getattr(cfg, "source_type_quotas", None),
+        min_per_type=getattr(cfg, "min_source_per_type", None),
+    )
 
     # Deduplicate
     seen_urls: set[str] = set()
@@ -384,32 +394,61 @@ async def run_subagent(
                     "score": s.get("quality_score", 0.2),
                 })
 
-    # Compress: keep only top N tool results by quality score
-    cfg = get_config()
-    keep_n = cfg.keep_tool_results
+    # Compress evidence by token budget instead of fixed count
+    keep_n = getattr(cfg, "keep_tool_results", 5)
+    max_tokens = getattr(cfg, "max_evidence_tokens", 8000)
+    max_per_item = getattr(cfg, "max_evidence_per_item", 3000)
     evidence_before = len(evidence)
-    if keep_n > 0 and len(evidence) > keep_n:
+
+    if keep_n > 0:
         evidence.sort(key=lambda x: x.get("score", 0.2), reverse=True)
-        evidence = evidence[:keep_n]
-        logger.info("Compressed evidence from %d to %d items (keep_tool_results=%d)",
-                     evidence_before, keep_n, keep_n)
+        # Phase 1 — guarantee minimum count
+        selected = evidence[:keep_n]
+        used_tokens = sum(estimate_tokens(e["data"]) for e in selected)
+        remaining_budget = max_tokens - used_tokens
+
+        # Phase 2 — fill remaining token budget with additional evidence
+        for e in evidence[keep_n:]:
+            tokens = estimate_tokens(e["data"])
+            if tokens <= remaining_budget:
+                selected.append(e)
+                remaining_budget -= tokens
+            elif remaining_budget > 200:
+                # Try to fit a truncated version
+                allowed_chars = min(max_per_item, remaining_budget * 3)
+                truncated = smart_truncate(e["data"], allowed_chars)
+                if len(truncated) > allowed_chars * 0.5:
+                    e["data"] = truncated
+                    selected.append(e)
+                break
+            else:
+                break
+        evidence = selected
+
+        if evidence_before > len(evidence):
+            logger.info("Compressed evidence from %d to %d items (budget %d tokens, used ~%d)",
+                        evidence_before, len(evidence), max_tokens,
+                        max_tokens - remaining_budget)
 
     await trace("subagents", "evidence_built", f"Built {len(evidence)} evidence items", {
         "subtask_id": sid,
         "evidence_count": len(evidence),
-        "compressed_from": evidence_before if keep_n > 0 and evidence_before > keep_n else None,
+        "compressed_from": evidence_before if evidence_before > len(evidence) else None,
         "keep_tool_results": keep_n,
+        "max_evidence_tokens": max_tokens,
         "sources": [
             {"url": e["url"], "score": e.get("score"), "type": e["data"].split("]")[0].lstrip("[")}
             for e in evidence[:10]
         ],
     }, level="debug")
 
-    # Truncate each evidence item to keep context manageable
-    max_evidence_per_item = 3000
+    # Truncate each evidence item with smart boundaries
     for e in evidence:
-        if len(e["data"]) > max_evidence_per_item:
-            e["data"] = e["data"][:max_evidence_per_item] + "\n...[truncated]"
+        item_limit = max_per_item
+        if e["data"].startswith("[DOCUMENT]"):
+            item_limit = min(5000, max_per_item + 2000)
+        if len(e["data"]) > item_limit:
+            e["data"] = smart_truncate(e["data"], item_limit)
 
     evidence_text = "\n\n".join(f"[From {e['url']}]: {e['data']}" for e in evidence)
 

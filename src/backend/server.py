@@ -156,6 +156,13 @@ async def stream_research(request: ResearchRequest):
     _cancel_flags[run_id] = asyncio.Event()
     cfg = get_config()
 
+    # Register in active_runs so history page can query / cancel it
+    active_runs[run_id] = {
+        "query": request.query,
+        "status": "running",
+        "task": None,
+    }
+
     async def generator():
         event_queue: asyncio.Queue = asyncio.Queue()
 
@@ -184,8 +191,16 @@ async def stream_research(request: ResearchRequest):
             }
 
             graph_task = asyncio.create_task(
-                build_and_run_graph(state, on_event)
+                build_and_run_graph(state, on_event, cancel_event=_cancel_flags.get(run_id))
             )
+            active_runs[run_id]["task"] = graph_task
+
+            # Clean up resources when the task finishes (regardless of client disconnect)
+            def _cleanup_task(_fut):
+                _cancel_flags.pop(run_id, None)
+                active_runs.pop(run_id, None)
+
+            graph_task.add_done_callback(_cleanup_task)
 
             while not graph_task.done():
                 done, _ = await asyncio.wait([graph_task], timeout=0.1)
@@ -230,8 +245,10 @@ async def stream_research(request: ResearchRequest):
             })
 
         except asyncio.CancelledError:
-            await update_run_status(run_id, "cancelled")
-            yield serialize_event("error", {"error": "Research cancelled", "phase": "pipeline"})
+            # Client disconnected — stop streaming, but do NOT cancel the research task.
+            # graph_task continues running in background; _cleanup_task handles cleanup.
+            return
+
         except Exception as e:
             await update_run_status(run_id, "failed")
             yield serialize_event("error", {
@@ -239,9 +256,6 @@ async def stream_research(request: ResearchRequest):
                 "phase": "pipeline",
                 "hint": _get_error_hint(str(e)),
             })
-        finally:
-            _cancel_flags.pop(run_id, None)
-            active_runs.pop(run_id, None)
 
     return StreamingResponse(
         generator(),
@@ -260,7 +274,7 @@ async def cancel_research(run_id: str):
     if flag:
         flag.set()
         entry = active_runs.get(run_id)
-        if entry and "task" in entry:
+        if entry and entry.get("task"):
             entry["task"].cancel()
         return {"status": "cancelled", "run_id": run_id}
     raise HTTPException(status_code=404, detail="Research run not found")

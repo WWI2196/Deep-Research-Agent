@@ -226,6 +226,7 @@ function handleResearchEvent(evt) {
 
   if (e.type === 'error') {
     store.set('error', { error: e.error, hint: e.hint, phase: e.phase });
+    stopPollers();
   }
 
   if (e.type === 'complete') {
@@ -238,10 +239,7 @@ function handleResearchEvent(evt) {
       provider: e.provider,
       model: e.model,
     });
-    if (elapsedTimer) {
-      clearInterval(elapsedTimer);
-      elapsedTimer = null;
-    }
+    stopPollers();
   }
 
   // Update UI
