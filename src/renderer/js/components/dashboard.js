@@ -34,7 +34,7 @@ function initDashboardPage() {
   // Start timeline polling for detailed events
   if (!timelinePoller) {
     pollTimeline(); // immediate first call
-    timelinePoller = setInterval(pollTimeline, 5000);
+    timelinePoller = setInterval(pollTimeline, 2000);
   }
 }
 
@@ -44,7 +44,11 @@ async function pollStatus() {
 
   try {
     const data = await fetchRunStatus(runId);
-    store.set('currentPhase', data.phase || 'unknown');
+    // Only set phase from status if timeline hasn't provided one yet
+    const currentPhase = store.get('currentPhase');
+    if (!currentPhase || currentPhase === 'unknown') {
+      store.set('currentPhase', data.phase || 'unknown');
+    }
     store.set('progressPercent', data.progress_percent || 0);
     store.set('completionStats', {
       total_sources: data.total_sources || 0,
@@ -104,8 +108,12 @@ async function pollTimeline() {
 function convertTimelineItemToEvent(item) {
   // Convert trace_log / llm_call timeline items back to dashboard event format
   const t = item.type || item.event_type || '';
-  if (t === 'node_enter' || t === 'node_exit') {
+  if (t === 'node_enter') {
     return { type: 'phase-update', phase: item.phase, message: item.message };
+  }
+  // Ignore node_exit — it would overwrite the current phase with a completed one
+  if (t === 'node_exit') {
+    return null;
   }
   if (t === 'llm_call') {
     return { type: 'llm-call', role: item.role, status: item.message?.includes('error') ? 'error' : 'completed', model: item.model, provider: item.provider };

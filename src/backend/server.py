@@ -318,6 +318,8 @@ async def get_research_status(run_id: str):
         "total_sources": len(state.get("sources", [])),
         "query": run.get("query", ""),
         "active": active,
+        "started_at": run.get("started_at"),
+        "completed_at": run.get("completed_at"),
     }
 
 

@@ -83,6 +83,10 @@ async function viewHistoryReport(runId) {
       total_reports: report.total_reports || 0,
       iterations: report.iterations || 0,
     });
+    // Calculate accurate duration from backend timestamps
+    const startedAt = report.started_at ? report.started_at * 1000 : 0;
+    const completedAt = report.completed_at ? report.completed_at * 1000 : Date.now();
+    store.set('elapsed', completedAt - startedAt);
     store.set('allSources', []);
     navigateTo('report');
     renderReportPage();

@@ -68,11 +68,20 @@ function viewHistoryLogs(event, runId) {
   showLogModal(runId);
 }
 
-window.viewHistoryProcess = function(runId) {
+window.viewHistoryProcess = async function(runId) {
   store.set('currentRunId', runId);
   store.set('running', true);
   store.set('complete', false);
-  store.set('startTime', Date.now());
+  // Reset timeline tracking so events are processed from the beginning
+  if (typeof lastTimelineLength !== 'undefined') lastTimelineLength = 0;
+  try {
+    const data = await fetchRunStatus(runId);
+    store.set('startTime', (data.started_at || Date.now() / 1000) * 1000);
+    store.set('currentPhase', data.phase || '');
+    store.set('progressPercent', data.progress_percent || 0);
+  } catch {
+    store.set('startTime', Date.now());
+  }
   navigateTo('dashboard');
 };
 
