@@ -1,54 +1,8 @@
 # Deep Research Agent
 
-A multi-agent deep research system that plans, searches, reads, reflects, and synthesizes high-quality cited reports. Web app powered by Python LangGraph backend with browser frontend.
+A multi-agent deep research system that plans, searches, reads, reflects, and synthesizes high-quality cited reports.
 
-## Features
-
-- **7-node LangGraph pipeline**: `init → plan → split → subagents → reflection → synthesize → cite`
-- **Structured planning**: Planner outputs JSON with dimensions, keywords, and source_types per dimension
-- **Rules-based query generation**: Search queries derived from dimension keywords × source type modifiers (no LLM call)
-- **Merged evaluation + selection**: Source scoring and full-text selection in a single LLM call
-- **Parallel subagents**: multiple research angles investigated concurrently via `asyncio.gather`
-- **Quantitative reflection**: Per-dimension 4-axis scoring (coverage/depth/evidence/recency), only low-score dimensions trigger gap-fill subtasks
-- **Truncation recovery**: Multi-round continuation synthesis with auto-detection of cut-off output
-- **Rule-based citations**: Subagent reports use `[src: url]` markers; deterministic `[^n]` numbering + References generation — zero LLM hallucination risk
-- **SearXNG search**: self-hosted, 70+ engines aggregated (Google, Bing, Wikipedia, arXiv, etc.) — free, unlimited
-- **trafilatura extraction**: free content fetching with clean markdown output — no paid scraping APIs
-- **Real-time SSE streaming**: all pipeline events pushed to frontend via `POST /api/research/stream`
-- **Multi-provider LLM routing**: 7 roles can use different models; 6 built-in providers (mimo, openai, anthropic, gemini, deepseek, openrouter)
-- **SQLite persistence**: runs, checkpoints, sources, reports stored locally at `~/.deep-research/history.db`
-- **156 backend tests**: pytest suite covering pipeline, agents, search, providers, server, persistence
-
-## Architecture
-
-```
-Browser (http://127.0.0.1:8787)
-  │
-  │ fetch + SSE (same-origin)
-  ▼
-┌───────────────────────────────────────────────────────┐
-│                Python Backend (:8787)                  │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌─────────┐  │
-│  │ server.py│ │ graph.py │ │subagent  │ │search.py│  │
-│  │ FastAPI  │ │LangGraph │ │planning  │ │SearXNG  │  │
-│  │ Static   │ │7 nodes   │ │synthesis │ │trafilatura│ │
-│  │ Files    │ │          │ │llm.py    │ │         │  │
-│  └──────────┘ └──────────┘ └──────────┘ └─────────┘  │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐              │
-│  │config.py │ │persist.py│ │prompts.py│              │
-│  │yaml+env  │ │ SQLite   │ │6 prompts │              │
-│  └──────────┘ └──────────┘ └──────────┘              │
-└───────────────────────────────────────────────────────┘
-        │
-        ▼
-┌──────────┐  ┌──────────┐
-│ SearXNG  │  │ OpenRouter│
-│ :8080    │  │ (or any   │
-│ 70+ eng. │  │ OpenAI/   │
-│ free     │  │ Anthropic │
-└──────────┘  │ provider) │
-              └──────────┘
-```
+**Web app**: Python FastAPI + LangGraph backend, Vanilla JS browser frontend. Self-hosted search, local document library RAG, zero paid scraping APIs.
 
 ## Quick Start
 
@@ -56,8 +10,7 @@ Browser (http://127.0.0.1:8787)
 
 - Python 3.12+ with [uv](https://docs.astral.sh/uv/)
 - Docker (for SearXNG)
-- An LLM API key (OpenRouter recommended, or any OpenAI-compatible provider)
-- A modern browser (Chrome, Firefox, Safari)
+- An LLM API key (OpenRouter, Mimo, or any OpenAI-compatible provider)
 
 ### 1. Clone and install
 
@@ -103,7 +56,7 @@ export LLM_MODEL=anthropic/claude-sonnet-4
 ```bash
 mkdir -p ~/searxng
 cd ~/searxng
-# Create docker-compose.yml and settings.yml (see config.yaml.example)
+# Create docker-compose.yml and settings.yml (see docs/searxng-setup.md)
 docker compose up -d
 # Verify: curl "http://127.0.0.1:8080/search?q=test&format=json"
 ```
@@ -121,93 +74,30 @@ uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787
 User Query
   │
   ▼
-init ──────── initialise state, assign run_id
-  │
-  ▼
-plan ──────── generate structured research plan (JSON: dimensions + keywords)
-  │
-  ▼
-split ─────── break plan into 3–8 parallel subtasks (self-heal on JSON errors)
-  │
-  ▼
-subagents ──┬── subagent 1: rules-based queries → search → evaluate+select → extract → report [src: url]
-            ├── subagent 2: rules-based queries → search → evaluate+select → extract → report [src: url]
-            └── subagent N: ...
-  │
-  ▼
-reflection ── per-dimension 4-axis scoring (coverage/depth/evidence/recency)
-  │           │
-  │    gaps (<0.6) ──→ create targeted subtasks (max 3) ──→ subagents (loop)
-  │
-  ▼
-synthesize ── single-pass LLM synthesis (max_tokens=16384) + truncation continuation
-  │
-  ▼
-cite ──────── rule-based: parse [src: url] → assign [^n] → generate References
-  │
-  ▼
-END ──────── stream final report via SSE
+init → plan → split → subagents → reflection → synthesize → cite → END
 ```
 
-### Subagent detail
+- **plan**: Structured research plan (dimensions + keywords + source types)
+- **split**: Break into 3–8 parallel subtasks
+- **subagents**: Each subagent searches the web + your document library, evaluates sources, extracts content, and writes a cited report
+- **reflection**: Quantitative per-dimension scoring; gaps trigger targeted re-search (up to max_iterations)
+- **synthesize**: Single-pass LLM synthesis with automatic truncation recovery
+- **cite**: Rule-based citation numbering + concurrent URL liveness verification
 
-```
-rules-based query generation (keywords × source_type modifiers)
-  → SearXNG search (parallel, asyncio.gather)
-  → batch evaluate + select full-text (single LLM call)
-  → enforce domain diversity (max 3 per domain)
-  → adaptive query refinement (if avg quality < 0.5)
-  → trafilatura extract (parallel, markdown)
-  → build evidence: [FULL-TEXT] + [SNIPPET]
-  → write 800–1500 word report with [src: url] markers
-```
+## Document Library (RAG)
 
-## API Endpoints
+Upload PDF, DOCX, TXT, MD, or HTML files into collections. The system uses:
+- **Chroma** vector store (semantic search)
+- **bm25s** + jieba (Chinese keyword search)
+- **RRF fusion** to combine both
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/health` | Backend health + provider info |
-| `GET` | `/api/config` | Current configuration |
-| `POST` | `/api/config` | Update configuration |
-| `GET` | `/api/models` | Available LLM providers |
-| `POST` | `/api/research` | Start research (returns run_id) |
-| `POST` | `/api/research/stream` | Start research with SSE streaming |
-| `POST` | `/api/research/{id}/cancel` | Cancel running research |
-| `GET` | `/api/research/history` | Past research runs |
-| `GET` | `/api/research/{id}/report` | Get report by run_id |
+Documents are parsed, chunked, embedded, and indexed asynchronously. During research, your document library is searched in parallel with web search.
 
 ## Testing
 
 ```bash
-uv run pytest tests/ -v    # backend tests
+uv run pytest tests/ -v    # 194 backend tests
 ```
-
-| Module | Tests |
-|--------|-------|
-| config.py | 21 |
-| search.py | 7 |
-| agent functions | 55 |
-| graph.py | 10 |
-| server.py | 17 |
-| persistence.py | 9 |
-| models.py | 10 |
-| providers/ | 20 |
-| export.py | 3 |
-| integration | 3 |
-| **Total** | **156** |
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Backend | Python 3.12, FastAPI, LangGraph |
-| Frontend | Vanilla JS, CSS, marked.js |
-| Search | SearXNG (self-hosted Docker) |
-| Extraction | trafilatura |
-| LLM | OpenRouter / OpenAI-compatible / Anthropic |
-| Storage | SQLite |
-| Testing | pytest, pytest-asyncio |
-| Package | uv (pyproject.toml) |
 
 ## License
 

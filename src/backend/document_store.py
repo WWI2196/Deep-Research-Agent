@@ -601,6 +601,14 @@ class DocumentStore:
                 retriever = bm25s.BM25()
                 retriever = await asyncio.to_thread(retriever.load, str(bm25_path))
 
+                # Load corpus mapping first so we can size k correctly
+                corpus_file = bm25_path / "corpus.json"
+                corpus_raw = await asyncio.to_thread(
+                    corpus_file.read_text, encoding="utf-8"
+                )
+                corpus_map = json.loads(corpus_raw)
+                corpus_ids = list(corpus_map.keys())
+
                 query_tokens = bm25s.tokenize(" ".join(_tokenize_chinese(query_text)))
                 corpus_size = len(corpus_ids)
                 bm25_k = min(top_k * 2, corpus_size)
@@ -608,17 +616,9 @@ class DocumentStore:
                     retriever.retrieve, query_tokens, k=bm25_k
                 )
 
-                # Load corpus mapping for text lookup
-                corpus_file = bm25_path / "corpus.json"
-                corpus_raw = await asyncio.to_thread(
-                    corpus_file.read_text, encoding="utf-8"
-                )
-                corpus_map = json.loads(corpus_raw)
-
                 # results shape: [[doc_idx_0, doc_idx_1, ...]]
                 # We need to map back to Chroma IDs
                 # corpus.json keys are Chroma chunk IDs
-                corpus_ids = list(corpus_map.keys())
                 for rank, idx in enumerate(results[0], start=1):
                     if idx < len(corpus_ids):
                         cid = corpus_ids[idx]

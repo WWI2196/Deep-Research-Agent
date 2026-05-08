@@ -43,6 +43,7 @@ async function startResearch() {
     () => {
       document.getElementById('btn-start').disabled = false;
       _streamController = null;
+      handleResearchDone();
     }
   );
 
