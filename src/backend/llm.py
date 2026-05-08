@@ -7,6 +7,7 @@ import time
 from .config import get_config
 from .helpers import clean_think_tags
 from .providers import get_provider
+from .tracing import trace_llm_call
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,7 @@ async def chat(
     temp = temperature if temperature is not None else role_cfg.temperature
 
     for attempt in range(max_retries):
+        start = time.monotonic()
         try:
             result = await provider.chat(
                 model=role_cfg.model,
@@ -63,16 +65,62 @@ async def chat(
                 max_tokens=max_tokens,
             )
             result = clean_think_tags(result)
+            latency_ms = int((time.monotonic() - start) * 1000)
+            await trace_llm_call(
+                role=role,
+                messages=messages,
+                provider=role_cfg.provider,
+                model=role_cfg.model,
+                response=result,
+                temperature=temp,
+                max_tokens=max_tokens,
+                latency_ms=latency_ms,
+                retry_attempt=attempt,
+            )
             return result
         except Exception as exc:
+            latency_ms = int((time.monotonic() - start) * 1000)
             err = str(exc).lower()
             if any(c in err for c in ["401", "403", "invalid"]):
+                await trace_llm_call(
+                    role=role,
+                    messages=messages,
+                    provider=role_cfg.provider,
+                    model=role_cfg.model,
+                    temperature=temp,
+                    max_tokens=max_tokens,
+                    latency_ms=latency_ms,
+                    retry_attempt=attempt,
+                    error=str(exc),
+                )
                 raise
             if attempt < max_retries - 1:
                 delay = 2.0 * (2**attempt)
                 logger.warning("LLM call [%s] attempt %d failed: %s. Retrying in %.1fs", role, attempt + 1, exc, delay)
+                await trace_llm_call(
+                    role=role,
+                    messages=messages,
+                    provider=role_cfg.provider,
+                    model=role_cfg.model,
+                    temperature=temp,
+                    max_tokens=max_tokens,
+                    latency_ms=latency_ms,
+                    retry_attempt=attempt,
+                    error=str(exc),
+                )
                 await asyncio.sleep(delay)
                 continue
+            await trace_llm_call(
+                role=role,
+                messages=messages,
+                provider=role_cfg.provider,
+                model=role_cfg.model,
+                temperature=temp,
+                max_tokens=max_tokens,
+                latency_ms=latency_ms,
+                retry_attempt=attempt,
+                error=str(exc),
+            )
             raise
 
     raise RuntimeError(f"LLM call exhausted retries for [{role}]")

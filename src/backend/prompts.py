@@ -89,20 +89,21 @@ Evidence provided below comes in two forms:
 
 Requirements:
 1. Write analytical prose with full paragraphs, not bullet points.
-2. After EVERY factual claim, include [src: https://example.com] immediately.
+2. After EVERY factual claim, include [src: <url>] immediately.
    Do not batch citations at paragraph end. A claim without [src:] will be treated as unverified.
    Use the exact URL from the evidence — do not truncate or modify it.
+   This includes file:// URLs for document-library sources. Example: [src: file:///Users/.../doc.md]
 3. Discuss mechanisms, causation, context, and nuance.
 4. If sources conflict, analyze disagreements.
 5. Include specific data, dates, names where available.
 6. Write 800–1500 words.
+7. Do NOT add a "Sources" or "References" section at the end — citations are inline only.
 
 Structure:
 # {subtask_title}
 ## Summary
 ## Analysis
-## Evidence Assessment
-## Sources"""
+## Evidence Assessment"""
 
 REFLECTION = """\
 You are a rigorous research quality auditor. Review the reports against the research plan dimensions.
@@ -149,12 +150,13 @@ Return JSON:
 }}"""
 
 SYNTHESIS = """\
-You are the Lead Research Coordinator. Synthesize all sub-agent reports into
-a comprehensive, publication-quality research report.
+You are the Lead Research Coordinator. Synthesize all sub-agent reports into a comprehensive, publication-quality research report.
 
 User query: {user_query}
 Methodology: {methodology}
-Expected structure: {output_structure}
+
+Expected structure (MANDATORY — create every section listed, use the exact headings, and do NOT merge, skip, or omit any section):
+{output_structure}
 
 Sub-agent reports:
 {subagent_reports}
@@ -163,21 +165,20 @@ Sub-agent reports:
 
 Requirements:
 1. Write 2000–4000 words of flowing analytical prose.
-2. INTEGRATE findings across reports — do NOT just summarize each report separately.
-   Find connections, contradictions, and cross-cutting themes.
-3. Use clear section headings and write full paragraphs under each.
-4. When evidence conflicts, analyze which sources are more credible and why.
-5. Include specific data, statistics, dates, names where available.
-6. Preserve ALL [src: <url>] markers from sub-agent reports.
-7. End with the exact marker <<END_OF_REPORT>> on its own line.
+2. STRICT SECTION COMPLIANCE: The final report MUST contain every section listed in Expected structure, with the exact headings provided. Do NOT merge multiple expected sections into one, do NOT skip sections, and do NOT reduce the number of sections.
+3. Within each section, INTEGRATE findings from relevant sub-agent reports. Find connections, contradictions, and cross-cutting themes. Multiple reports may contribute to the same section.
+4. Use the exact section headings from Expected structure as ## headings in the report.
+5. When evidence conflicts, analyze which sources are more credible and why.
+6. Include specific data, statistics, dates, names where available.
+7. CITATION PRESERVATION IS MANDATORY: Every factual claim must retain its original [src: <url>] marker from the sub-agent reports. This includes https:// URLs AND file:// URLs. Dropping a citation is a critical error. Use them exactly as they appear — do not rewrite, abbreviate, or omit them.
+8. End with the exact marker <<END_OF_REPORT>> on its own line.
+9. Do NOT add a "References", "Sources", or "Bibliography" section at the end. The citation system will add references automatically.
 
 Structure:
 # {user_query}
-## Introduction
-## [Thematic sections drawn from findings — not one per sub-report]
-## Cross-Cutting Analysis
-## Conclusions
-## Open Questions
+## [Use the first item from Expected structure]
+## [Use the second item from Expected structure]
+...continue for every item in Expected structure...
 <<END_OF_REPORT>>"""
 
 FAILURE_SUMMARY = """\

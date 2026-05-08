@@ -44,7 +44,7 @@ def normalize_search_item(item: dict[str, Any], source_label: str) -> dict[str, 
     description = pick_first_nonempty(
         item, ["description", "snippet", "summary", "content", "markdown", "text"]
     )
-    return {"title": title, "url": url, "description": description, "source": source_label}
+    return {"title": title, "url": url, "description": description, "source": item.get("source") or source_label}
 
 
 def has_clean_ending(text: str) -> bool:
@@ -81,7 +81,11 @@ def enforce_source_diversity(
     for s in sources:
         url = s.get("url", "")
         try:
-            domain = urlparse(url).netloc.replace("www.", "")
+            if url.startswith("file://"):
+                from pathlib import Path
+                domain = Path(url).parent.as_posix()
+            else:
+                domain = urlparse(url).netloc.replace("www.", "")
         except Exception:
             domain = url
         if domain_count[domain] < max_per_domain:

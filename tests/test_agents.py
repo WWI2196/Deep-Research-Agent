@@ -491,7 +491,7 @@ async def test_run_subagents_parallel_success():
     ]
 
     with patch("src.backend.subagent.run_subagent", new_callable=AsyncMock) as mock_run:
-        async def fake_run(uq, rp, st, budget, query_cache=None):
+        async def fake_run(uq, rp, st, budget, query_cache=None, document_collections=None):
             return {
                 "subtask_id": st["id"],
                 "subtask_title": st["title"],
@@ -518,7 +518,7 @@ async def test_run_subagents_parallel_one_fails():
     ]
 
     with patch("src.backend.subagent.run_subagent", new_callable=AsyncMock) as mock_run:
-        async def fake_run(uq, rp, st, budget, query_cache=None):
+        async def fake_run(uq, rp, st, budget, query_cache=None, document_collections=None):
             if "fails" in st["title"]:
                 raise RuntimeError("subagent error")
             return {
@@ -546,7 +546,7 @@ async def test_run_subagents_parallel_dedup_sources():
     ]
 
     with patch("src.backend.subagent.run_subagent", new_callable=AsyncMock) as mock_run:
-        async def fake_run(uq, rp, st, budget, query_cache=None):
+        async def fake_run(uq, rp, st, budget, query_cache=None, document_collections=None):
             return {
                 "subtask_id": st["id"],
                 "subtask_title": st["title"],
@@ -834,3 +834,81 @@ async def test_run_subagent_empty_result_triggers_broader():
 
     # The broader query path was triggered
     assert len(call_args_list) >= 1
+
+
+# ── _trim_reports_by_whole ─────────────────────────────────────
+
+def test_trim_reports_by_whole_fits():
+    from src.backend.synthesis import _trim_reports_by_whole
+    reports = ["Report A content", "Report B content", "Report C content"]
+    result = _trim_reports_by_whole(reports, 1000)
+    assert "Report A" in result
+    assert "Report B" in result
+    assert "Report C" in result
+
+
+def test_trim_reports_by_whole_drops_shortest():
+    from src.backend.synthesis import _trim_reports_by_whole
+    reports = ["A" * 100, "B" * 100, "C" * 10]
+    # Limit forces dropping the shortest report(s)
+    result = _trim_reports_by_whole(reports, 220)
+    assert "A" * 100 in result
+    assert "B" * 100 in result
+    # C is shortest and may be dropped
+    if "C" * 10 not in result:
+        assert len(result) <= 220
+
+
+def test_trim_reports_by_whole_empty():
+    from src.backend.synthesis import _trim_reports_by_whole
+    assert _trim_reports_by_whole([], 100) == ""
+
+
+# ── _strip_existing_ref_sections length guard ──────────────────
+
+def test_strip_ref_sections_length_guard():
+    from src.backend.synthesis import _strip_existing_ref_sections
+    # Model inserted "## References" mid-report followed by another heading.
+    # Stripping would delete the huge block between References and the next ##.
+    long_middle = "This is a very long paragraph that takes up most of the report space. " * 10
+    report = (
+        "# Title\n\nShort intro.\n\n"
+        "## References\n\n"
+        f"{long_middle}\n\n"
+        "## Next Section\n\n"
+        "Tail content that should survive."
+    )
+    result = _strip_existing_ref_sections(report)
+    # Should skip strip because >50% would be removed
+    assert "Tail content that should survive" in result
+
+
+def test_strip_ref_sections_normal():
+    from src.backend.synthesis import _strip_existing_ref_sections
+    report = "# Title\n\nBody text.\n\n## References\n\n[^1]: url\n"
+    result = _strip_existing_ref_sections(report)
+    assert "Body text" in result
+    assert "## References" not in result
+
+
+# ── add_citations appends uncited sources ──────────────────────
+
+@pytest.mark.asyncio
+async def test_add_citations_appends_uncited_sources():
+    from src.backend.synthesis import add_citations
+
+    report = "Claim [src: https://example.com/1] about topic."
+    sources = [
+        {"url": "https://example.com/1", "title": "Web Source"},
+        {"url": "file:///Users/eureka/docs/doc1.md", "title": "Doc Source"},
+    ]
+    with patch("src.backend.synthesis._verify_citation_urls", new_callable=AsyncMock) as mock_verify:
+        mock_verify.return_value = {"https://example.com/1": True, "file:///Users/eureka/docs/doc1.md": True}
+        result, verification = await add_citations(report, sources)
+
+    assert "[^1]" in result
+    assert "Web Source" in result
+    # Uncited file:// source should appear in additional sources section
+    assert "Doc Source" in result
+    assert "file:///Users/eureka/docs/doc1.md" in result
+    assert "Additional sources" in result or "Document Library" in result

@@ -38,6 +38,7 @@ class ResearchRequest(BaseModel):
     keep_tool_results: int | None = None
     provider: str | None = None
     model: str | None = None
+    document_collections: list[str] | None = None
 
 
 class ResearchResponse(BaseModel):
@@ -52,7 +53,18 @@ class ConfigUpdateRequest(BaseModel):
     quality_threshold: float | None = None
     context_compress_retries: int | None = None
     keep_tool_results: int | None = None
+    log_level: str | None = None
     roles: dict[str, dict[str, str]] | None = None
+
+
+class CollectionCreateRequest(BaseModel):
+    name: str
+    description: str = ""
+
+
+class CollectionUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
 
 
 # ── LangGraph state ──
@@ -80,3 +92,4 @@ class ResearchState(TypedDict, total=False):
     context_compress_retries: int
     keep_tool_results: int
     query_cache: dict[str, list[dict[str, Any]]]
+    document_collections: list[str]

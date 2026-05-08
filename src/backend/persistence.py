@@ -21,12 +21,13 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-def _write_sync(op) -> None:
+def _write_sync(op):
     """Run a write operation on a fresh connection with commit+close."""
     conn = _get_conn()
     try:
-        op(conn)
+        result = op(conn)
         conn.commit()
+        return result
     finally:
         conn.close()
 
@@ -40,8 +41,8 @@ def _read_sync(op):
         conn.close()
 
 
-async def _write_async(op) -> None:
-    await asyncio.to_thread(_write_sync, op)
+async def _write_async(op):
+    return await asyncio.to_thread(_write_sync, op)
 
 
 async def _read_async(op):
@@ -93,10 +94,66 @@ def init_db() -> None:
             created_at INTEGER NOT NULL,
             FOREIGN KEY (run_id) REFERENCES runs(run_id)
         );
+        CREATE TABLE IF NOT EXISTS collections (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            doc_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'ready',
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS documents (
+            id TEXT PRIMARY KEY,
+            collection_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_type TEXT,
+            category TEXT,
+            tags TEXT,
+            page_count INTEGER DEFAULT 0,
+            chunk_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'indexed',
+            error_msg TEXT,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
+        );
         CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_checkpoints_run_id ON checkpoints(run_id);
         CREATE INDEX IF NOT EXISTS idx_sources_run_id ON sources(run_id);
         CREATE INDEX IF NOT EXISTS idx_reports_run_id ON subagent_reports(run_id);
+        CREATE INDEX IF NOT EXISTS idx_documents_collection_id ON documents(collection_id);
+        CREATE TABLE IF NOT EXISTS llm_calls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            call_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            temperature REAL,
+            max_tokens INTEGER,
+            messages TEXT NOT NULL,
+            response TEXT,
+            latency_ms INTEGER,
+            retry_attempt INTEGER DEFAULT 0,
+            error TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS trace_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            level TEXT NOT NULL DEFAULT 'info',
+            event_type TEXT NOT NULL,
+            message TEXT NOT NULL,
+            details TEXT,
+            parent_id INTEGER,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_calls_run_id ON llm_calls(run_id);
+        CREATE INDEX IF NOT EXISTS idx_llm_calls_role ON llm_calls(role);
+        CREATE INDEX IF NOT EXISTS idx_trace_logs_run_id ON trace_logs(run_id);
+        CREATE INDEX IF NOT EXISTS idx_trace_logs_phase ON trace_logs(phase);
+        CREATE INDEX IF NOT EXISTS idx_trace_logs_event_type ON trace_logs(event_type);
     """)
     conn.commit()
     conn.close()
@@ -187,6 +244,35 @@ def get_run_history(limit: int = 20) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def get_run_by_id(run_id: str) -> dict[str, Any] | None:
+    """Get a single run's metadata from the runs table."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT run_id, query, status, provider, model, total_sources, total_reports, iterations, started_at, completed_at, report_path FROM runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_latest_checkpoint(run_id: str) -> dict[str, Any] | None:
+    """Get the most recent checkpoint for a run (phase + state_json)."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT phase, state FROM checkpoints WHERE run_id=? ORDER BY created_at DESC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    conn.close()
+    if not row:
+        return None
+    result = dict(row)
+    try:
+        result["state"] = json.loads(result["state"])
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return result
+
+
 def get_run_report(run_id: str) -> dict[str, Any] | None:
     conn = _get_conn()
     row = conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
@@ -219,3 +305,248 @@ def get_report_content(run_id: str) -> str:
         return "\n\n".join(r["content"] for r in rows)
 
     return ""
+
+
+# ── collections & documents ─────────────────────────────────────
+
+async def persist_collection(collection_id: str, name: str, description: str = "") -> None:
+    await _write_async(lambda conn: conn.execute(
+        "INSERT OR REPLACE INTO collections (id, name, description, created_at) VALUES (?, ?, ?, ?)",
+        (collection_id, name, description, int(time.time())),
+    ))
+
+
+async def delete_collection_db(collection_id: str) -> None:
+    await _write_async(lambda conn: conn.execute(
+        "DELETE FROM collections WHERE id=?", (collection_id,)
+    ))
+
+
+async def list_collections_db() -> list[dict[str, Any]]:
+    def _read(conn):
+        rows = conn.execute(
+            """
+            SELECT c.id, c.name, c.description, c.status, c.created_at,
+                   COUNT(d.id) as doc_count
+            FROM collections c
+            LEFT JOIN documents d ON d.collection_id = c.id
+            GROUP BY c.id
+            ORDER BY c.created_at DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+    return await _read_async(_read)
+
+
+async def get_collection_db(collection_id: str) -> dict[str, Any] | None:
+    def _read(conn):
+        row = conn.execute(
+            """
+            SELECT c.id, c.name, c.description, c.status, c.created_at,
+                   COUNT(d.id) as doc_count
+            FROM collections c
+            LEFT JOIN documents d ON d.collection_id = c.id
+            WHERE c.id = ?
+            GROUP BY c.id
+            """,
+            (collection_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    return await _read_async(_read)
+
+
+async def persist_document(
+    doc_id: str,
+    collection_id: str,
+    name: str,
+    file_path: str,
+    file_type: str,
+    category: str = "",
+    tags: str = "[]",
+    page_count: int = 0,
+    chunk_count: int = 0,
+    status: str = "indexed",
+    error_msg: str = "",
+) -> None:
+    await _write_async(lambda conn: conn.execute(
+        """
+        INSERT INTO documents (id, collection_id, name, file_path, file_type, category, tags, page_count, chunk_count, status, error_msg, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (doc_id, collection_id, name, file_path, file_type, category, tags, page_count, chunk_count, status, error_msg, int(time.time())),
+    ))
+
+
+async def delete_document_db(collection_id: str, doc_id: str) -> None:
+    await _write_async(lambda conn: conn.execute(
+        "DELETE FROM documents WHERE id=? AND collection_id=?",
+        (doc_id, collection_id),
+    ))
+
+
+async def update_document_status(
+    doc_id: str,
+    status: str,
+    chunk_count: int = 0,
+    page_count: int = 0,
+    error_msg: str = "",
+) -> None:
+    await _write_async(lambda conn: conn.execute(
+        """
+        UPDATE documents
+        SET status=?, chunk_count=?, page_count=?, error_msg=?
+        WHERE id=?
+        """,
+        (status, chunk_count, page_count, error_msg, doc_id),
+    ))
+
+
+async def get_document_db(doc_id: str) -> dict[str, Any] | None:
+    def _read(conn):
+        row = conn.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
+        return dict(row) if row else None
+    return await _read_async(_read)
+
+
+async def list_documents_db(collection_id: str) -> list[dict[str, Any]]:
+    def _read(conn):
+        rows = conn.execute(
+            "SELECT * FROM documents WHERE collection_id=? ORDER BY created_at DESC",
+            (collection_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    return await _read_async(_read)
+
+
+# ── tracing ─────────────────────────────────────────────────────
+
+async def persist_llm_call(
+    run_id: str,
+    call_id: str,
+    role: str,
+    provider: str,
+    model: str,
+    messages: str,
+    response: str,
+    latency_ms: int = 0,
+    retry_attempt: int = 0,
+    error: str = "",
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> None:
+    await _write_async(lambda conn: conn.execute(
+        """
+        INSERT INTO llm_calls
+        (run_id, call_id, role, provider, model, temperature, max_tokens, messages, response, latency_ms, retry_attempt, error, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (run_id, call_id, role, provider, model, temperature, max_tokens, messages, response, latency_ms, retry_attempt, error, int(time.time())),
+    ))
+
+
+async def persist_trace_log(
+    run_id: str,
+    phase: str,
+    event_type: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+    level: str = "info",
+    parent_id: int | None = None,
+) -> int:
+    def _write(conn) -> int:
+        cursor = conn.execute(
+            """
+            INSERT INTO trace_logs
+            (run_id, phase, level, event_type, message, details, parent_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, phase, level, event_type, message, json.dumps(details) if details else None, parent_id, int(time.time())),
+        )
+        return cursor.lastrowid
+
+    return await _write_async(_write)
+
+
+def get_run_logs(
+    run_id: str,
+    phase: str | None = None,
+    level: str | None = None,
+    event_type: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    conn = _get_conn()
+    query = "SELECT * FROM trace_logs WHERE run_id=?"
+    params: list[Any] = [run_id]
+    if phase:
+        query += " AND phase=?"
+        params.append(phase)
+    if level:
+        query += " AND level=?"
+        params.append(level)
+    if event_type:
+        query += " AND event_type=?"
+        params.append(event_type)
+    query += " ORDER BY created_at ASC, id ASC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_run_llm_calls(
+    run_id: str,
+    role: str | None = None,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    conn = _get_conn()
+    query = "SELECT * FROM llm_calls WHERE run_id=?"
+    params: list[Any] = [run_id]
+    if role:
+        query += " AND role=?"
+        params.append(role)
+    query += " ORDER BY created_at ASC, id ASC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_run_timeline(run_id: str, limit: int = 1000) -> list[dict[str, Any]]:
+    """Merge trace_logs and llm_calls into a single chronological timeline."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT
+            'trace' as source,
+            id,
+            phase,
+            event_type as type,
+            level,
+            message,
+            details,
+            NULL as role,
+            NULL as model,
+            NULL as latency_ms,
+            created_at
+        FROM trace_logs WHERE run_id=?
+        UNION ALL
+        SELECT
+            'llm' as source,
+            id,
+            'llm' as phase,
+            'llm_call' as type,
+            'info' as level,
+            'LLM call [' || role || '] ' || CASE WHEN error IS NULL OR error='' THEN 'success' ELSE 'error' END as message,
+            json_object('role', role, 'model', model, 'provider', provider, 'temperature', temperature, 'max_tokens', max_tokens, 'retry_attempt', retry_attempt, 'error', error, 'messages_preview', substr(messages, 1, 500), 'response_preview', substr(response, 1, 500)) as details,
+            role,
+            model,
+            latency_ms,
+            created_at
+        FROM llm_calls WHERE run_id=?
+        ORDER BY created_at ASC, id ASC
+        LIMIT ?
+        """,
+        (run_id, run_id, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

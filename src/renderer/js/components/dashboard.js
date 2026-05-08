@@ -1,17 +1,127 @@
 // ── Dashboard event handling & orchestration ──────────────────────
 
 let elapsedTimer = null;
+let statusPoller = null;
+let timelinePoller = null;
+let lastTimelineLength = 0;
 
-// Clean up timer when navigating away from dashboard
+function stopPollers() {
+  if (statusPoller) { clearInterval(statusPoller); statusPoller = null; }
+  if (timelinePoller) { clearInterval(timelinePoller); timelinePoller = null; }
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+}
+
+// Clean up when navigating away from dashboard
 onPageCleanup('dashboard', () => {
-  if (elapsedTimer) {
-    clearInterval(elapsedTimer);
-    elapsedTimer = null;
-  }
+  stopPollers();
 });
+
+function initDashboardPage() {
+  const runId = store.get('currentRunId');
+  if (!runId) return;
+
+  // Start elapsed timer
+  if (!elapsedTimer && !store.get('complete')) {
+    startElapsedTimer();
+  }
+
+  // Start status polling
+  if (!statusPoller) {
+    pollStatus(); // immediate first call
+    statusPoller = setInterval(pollStatus, 2000);
+  }
+
+  // Start timeline polling for detailed events
+  if (!timelinePoller) {
+    pollTimeline(); // immediate first call
+    timelinePoller = setInterval(pollTimeline, 5000);
+  }
+}
+
+async function pollStatus() {
+  const runId = store.get('currentRunId');
+  if (!runId) return;
+
+  try {
+    const data = await fetchRunStatus(runId);
+    store.set('currentPhase', data.phase || 'unknown');
+    store.set('progressPercent', data.progress_percent || 0);
+    store.set('completionStats', {
+      total_sources: data.total_sources || 0,
+      total_reports: data.total_reports || 0,
+      iterations: data.iteration || 0,
+    });
+
+    if (data.status === 'completed') {
+      stopPollers();
+      store.set('running', false);
+      store.set('complete', true);
+      try {
+        const report = await fetchReport(runId);
+        if (report && report.content) {
+          store.set('citedReport', report.content);
+        }
+      } catch {}
+      navigateTo('report');
+      renderReportPage();
+      return;
+    }
+
+    if (data.status === 'cancelled' || data.status === 'failed') {
+      stopPollers();
+      store.set('running', false);
+      store.set('error', { error: `Research ${data.status}`, phase: data.phase || '' });
+      updateDashboardUI();
+      return;
+    }
+
+    updateDashboardUI();
+  } catch {
+    // Silently retry on next poll
+  }
+}
+
+async function pollTimeline() {
+  const runId = store.get('currentRunId');
+  if (!runId) return;
+
+  try {
+    const data = await fetchRunTimeline(runId);
+    const items = data.items || [];
+    if (items.length > lastTimelineLength) {
+      const newItems = items.slice(lastTimelineLength);
+      lastTimelineLength = items.length;
+      for (const item of newItems) {
+        const evt = convertTimelineItemToEvent(item);
+        if (evt) handleResearchEvent(evt);
+      }
+    }
+  } catch {
+    // Silently retry on next poll
+  }
+}
+
+function convertTimelineItemToEvent(item) {
+  // Convert trace_log / llm_call timeline items back to dashboard event format
+  const t = item.type || item.event_type || '';
+  if (t === 'node_enter' || t === 'node_exit') {
+    return { type: 'phase-update', phase: item.phase, message: item.message };
+  }
+  if (t === 'llm_call') {
+    return { type: 'llm-call', role: item.role, status: item.message?.includes('error') ? 'error' : 'completed', model: item.model, provider: item.provider };
+  }
+  if (t === 'error') {
+    return { type: 'error', error: item.message, phase: item.phase };
+  }
+  return null;
+}
 
 function handleResearchEvent(evt) {
   const e = evt;
+
+  if (e.run_id && !store.get('currentRunId')) {
+    store.set('currentRunId', e.run_id);
+  }
 
   if (e.type === 'phase-update') {
     store.set('currentPhase', e.phase);

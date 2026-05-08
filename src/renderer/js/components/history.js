@@ -15,18 +15,31 @@ async function initHistoryPage() {
         </tr></thead>
         <tbody>
           ${data.history.map(r => {
-            const isCompleted = r.status === 'completed';
-            const onClick = isCompleted ? `onclick="viewHistoryReport('${r.run_id}')"` : '';
-            const rowClass = isCompleted ? 'clickable' : 'not-clickable';
+            let onClick = '';
+            let rowClass = 'not-clickable';
+            let cursorStyle = 'cursor:not-allowed';
+            if (r.status === 'completed') {
+              onClick = `onclick="viewHistoryReport('${r.run_id}')"`;
+              rowClass = 'clickable';
+              cursorStyle = 'cursor:pointer';
+            } else if (r.status === 'running') {
+              onClick = `onclick="viewHistoryProcess('${r.run_id}')"`;
+              rowClass = 'clickable';
+              cursorStyle = 'cursor:pointer';
+            }
+            const opacity = (r.status === 'completed' || r.status === 'running') ? '' : 'opacity:0.6';
             return `
-            <tr class="${rowClass}" ${onClick} style="${isCompleted ? '' : 'opacity:0.6;cursor:default'}">
+            <tr class="${rowClass}" ${onClick} style="${opacity};${cursorStyle}">
               <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(r.query)}</td>
               <td><span class="history-status ${r.status}">${r.status}</span></td>
               <td>${r.total_sources || 0}</td>
               <td>${r.total_reports || 0}</td>
               <td>${r.iterations || 0}</td>
               <td style="color:var(--text-tertiary);font-size:11px">${timeAgo(r.started_at)}</td>
-              <td><button class="history-delete-btn" onclick="deleteHistoryItem(event, '${r.run_id}')" title="Delete">×</button></td>
+              <td>
+                <button class="history-log-btn" onclick="viewHistoryLogs(event, '${r.run_id}')" title="Logs">Logs</button>
+                <button class="history-delete-btn" onclick="deleteHistoryItem(event, '${r.run_id}')" title="Delete">×</button>
+              </td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -48,4 +61,17 @@ async function deleteHistoryItem(event, runId) {
   }
 }
 
+function viewHistoryLogs(event, runId) {
+  event.stopPropagation();
+  showLogModal(runId);
+}
+
+window.viewHistoryProcess = function(runId) {
+  store.set('currentRunId', runId);
+  store.set('running', true);
+  store.set('complete', false);
+  navigateTo('dashboard');
+};
+
 window.deleteHistoryItem = deleteHistoryItem;
+window.viewHistoryLogs = viewHistoryLogs;

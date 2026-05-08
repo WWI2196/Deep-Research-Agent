@@ -18,7 +18,8 @@ def mock_deps():
          patch("src.backend.graph.persist_run", new_callable=AsyncMock) as mock_persist_run, \
          patch("src.backend.graph.persist_checkpoint", new_callable=AsyncMock) as mock_persist_ckpt, \
          patch("src.backend.graph.persist_source", new_callable=AsyncMock) as mock_persist_src, \
-         patch("src.backend.graph.persist_subagent_report", new_callable=AsyncMock) as mock_persist_rpt:
+         patch("src.backend.graph.persist_subagent_report", new_callable=AsyncMock) as mock_persist_rpt, \
+         patch("src.backend.graph.trace", new_callable=AsyncMock) as mock_trace:
 
         # Default config
         cfg = MagicMock()
@@ -72,6 +73,7 @@ def mock_deps():
             "subs": mock_subs, "synth": mock_synth, "cite": mock_cite, "chat": mock_chat,
             "persist_run": mock_persist_run, "persist_ckpt": mock_persist_ckpt,
             "persist_src": mock_persist_src, "persist_rpt": mock_persist_rpt,
+            "trace": mock_trace,
         }
         yield deps
 

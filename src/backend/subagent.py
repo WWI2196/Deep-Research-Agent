@@ -16,6 +16,7 @@ from .helpers import (
 )
 from .llm import chat
 from .prompts import SOURCE_EVALUATE, SUBAGENT_REPORT
+from .tracing import trace
 
 logger = logging.getLogger(__name__)
 
@@ -170,12 +171,56 @@ async def _refine_queries_if_needed(
         return []
 
 
+async def _search_document_collections(
+    collection_ids: list[str],
+    subtask: dict[str, Any],
+    user_query: str,
+) -> dict[str, Any] | None:
+    """Search private document collections using hybrid retrieval."""
+    from .document_store import DocumentStore
+
+    store = DocumentStore()
+    query = subtask.get("objective") or subtask.get("title") or user_query
+    await trace("subagents", "rag_search_start", f"Searching document collections", {
+        "collection_ids": collection_ids,
+        "subtask_id": subtask.get("id"),
+        "subtask_title": subtask.get("title"),
+        "query": query,
+        "top_k": 12,
+    }, level="debug")
+    results = await store.query(collection_ids, query, top_k=12)
+    if not results:
+        await trace("subagents", "rag_results", "No document results", {"count": 0}, level="debug")
+        return None
+
+    await trace("subagents", "rag_results", f"Document search returned {len(results)} chunks", {
+        "count": len(results),
+        "chunks": [
+            {"doc_name": r.get("doc_name"), "score": r.get("score"), "chunk_id": r.get("chunk_id")}
+            for r in results[:5]
+        ],
+    }, level="debug")
+
+    items: list[dict[str, Any]] = []
+    for r in results:
+        fp = r.get("file_path", "")
+        items.append({
+            "title": r["doc_name"],
+            "url": f"file://{fp}" if fp else f"doc://{r['doc_id']}",
+            "description": r["text"][:2000],
+            "score": r["score"],
+            "source": "document",
+        })
+    return {"data": items}
+
+
 async def run_subagent(
     user_query: str,
     research_plan: str,
     subtask: dict[str, Any],
     tool_budget: int,
     query_cache: dict[str, list[dict[str, Any]]] | None = None,
+    document_collections: list[str] | None = None,
 ) -> dict[str, Any]:
     sid = subtask["id"]
     stitle = subtask["title"]
@@ -214,7 +259,9 @@ async def run_subagent(
         except Exception:
             return None
 
-    tasks = [_search_one_cached(q) for q in search_queries]
+    tasks: list[Any] = [_search_one_cached(q) for q in search_queries]
+    if document_collections:
+        tasks.append(_search_document_collections(document_collections, subtask, user_query))
     search_results = await asyncio.gather(*tasks)
 
     raw_candidates: list[dict[str, Any]] = []
@@ -229,6 +276,12 @@ async def run_subagent(
     # 3 — evaluate + select full-text in one LLM call
     scored = await batch_evaluate_sources(raw_candidates, subtask.get("objective", user_query))
     scored.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+
+    # Document sources are highly trusted and always treated as full-text
+    for s in scored:
+        if s.get("source") == "document":
+            s["quality_score"] = max(s.get("quality_score", 0), 0.85)
+            s["full_text"] = True
 
     # 3b — adaptive query refinement
     refined_queries = await _refine_queries_if_needed(subtask, scored, queries)
@@ -292,6 +345,8 @@ async def run_subagent(
     # 4 — extract full text (markdown) via trafilatura for full_text_urls
     async def _extract_one(url: str) -> tuple[str, str | None]:
         try:
+            if url.startswith("file://"):
+                return url, None
             if url in full_text_urls:
                 text = await asyncio.to_thread(search_mod.extract, url)
                 return url, text
@@ -309,7 +364,14 @@ async def run_subagent(
         url = s.get("url")
         if not url or url not in top_urls:
             continue
-        if url in extracted_map:
+        if s.get("source") == "document":
+            text = s.get("description", "")
+            if text:
+                evidence.append({
+                    "url": url, "data": f"[DOCUMENT] {text}",
+                    "score": s.get("quality_score", 0.85),
+                })
+        elif url in extracted_map:
             evidence.append({
                 "url": url, "data": f"[FULL-TEXT] {extracted_map[url]}",
                 "score": s.get("quality_score", 0.2),
@@ -325,11 +387,23 @@ async def run_subagent(
     # Compress: keep only top N tool results by quality score
     cfg = get_config()
     keep_n = cfg.keep_tool_results
+    evidence_before = len(evidence)
     if keep_n > 0 and len(evidence) > keep_n:
         evidence.sort(key=lambda x: x.get("score", 0.2), reverse=True)
         evidence = evidence[:keep_n]
         logger.info("Compressed evidence from %d to %d items (keep_tool_results=%d)",
-                     len(filtered), keep_n, keep_n)
+                     evidence_before, keep_n, keep_n)
+
+    await trace("subagents", "evidence_built", f"Built {len(evidence)} evidence items", {
+        "subtask_id": sid,
+        "evidence_count": len(evidence),
+        "compressed_from": evidence_before if keep_n > 0 and evidence_before > keep_n else None,
+        "keep_tool_results": keep_n,
+        "sources": [
+            {"url": e["url"], "score": e.get("score"), "type": e["data"].split("]")[0].lstrip("[")}
+            for e in evidence[:10]
+        ],
+    }, level="debug")
 
     # Truncate each evidence item to keep context manageable
     max_evidence_per_item = 3000
@@ -398,13 +472,15 @@ async def run_subagents_parallel(
     subtasks: list[dict[str, Any]],
     tool_calls_per_subagent: int,
     query_cache: dict[str, list[dict[str, Any]]] | None = None,
+    document_collections: list[str] | None = None,
 ) -> dict[str, Any]:
     if query_cache is None:
         query_cache = {}
 
     tasks = [
         run_subagent(user_query, research_plan, st, tool_calls_per_subagent,
-                     query_cache=query_cache)
+                     query_cache=query_cache,
+                     document_collections=document_collections)
         for st in subtasks
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)

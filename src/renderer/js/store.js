@@ -85,6 +85,7 @@ function createStore() {
     _state.completionStats = null;
     _state.llmCalls = [];
     _state.warnings = [];
+    _state.currentRunId = '';
     _globalSubscribers.forEach(fn => fn('*', null, null));
   }
 

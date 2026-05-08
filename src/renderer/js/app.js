@@ -38,6 +38,8 @@ function navigateTo(page) {
   // Init page content
   if (page === 'history') initHistoryPage();
   if (page === 'settings') initSettingsPage();
+  if (page === 'library') initLibraryPage();
+  if (page === 'dashboard') initDashboardPage();
   if (page === 'input') {
     initInputPage();
     loadRecent();
@@ -50,7 +52,7 @@ document.getElementById('nav').addEventListener('click', (e) => {
   const btn = e.target.closest('.nav-btn[data-page]');
   if (!btn) return;
   const page = btn.dataset.page;
-  if (page === 'dashboard' && !store.get('running') && !store.get('complete')) {
+  if (page === 'dashboard' && !store.get('currentRunId')) {
     return;
   }
   navigateTo(page);

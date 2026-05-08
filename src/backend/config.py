@@ -79,6 +79,7 @@ class AppConfig:
     tool_calls_per_subagent: int = 15
     context_compress_retries: int = 1
     keep_tool_results: int = 5
+    log_level: str = "info"
     roles: dict[str, RoleConfig] = field(default_factory=dict)
 
     def get_role(self, name: str) -> RoleConfig:
@@ -97,6 +98,7 @@ class AppConfig:
             "quality_threshold": self.quality_threshold,
             "context_compress_retries": self.context_compress_retries,
             "keep_tool_results": self.keep_tool_results,
+            "log_level": self.log_level,
             "roles": {
                 name: {"provider": rc.provider, "model": rc.model}
                 for name, rc in self.roles.items()
@@ -219,6 +221,11 @@ def load_config() -> AppConfig:
         tool_calls_per_subagent=_research_int("TOOL_CALLS_PER_SUBAGENT", "tool_calls_per_subagent", 15),
         context_compress_retries=_research_int("CONTEXT_COMPRESS_RETRIES", "context_compress_retries", 1),
         keep_tool_results=_research_int("KEEP_TOOL_RESULTS", "keep_tool_results", 5),
+        log_level=(
+            os.getenv("LOG_LEVEL")
+            or (yaml_cfg.get("research", {}) or {}).get("log_level", "")
+            or "info"
+        ).lower(),
     )
 
     # ── Role overrides: env > yaml > (follow default) ──
@@ -255,6 +262,7 @@ def save_config(cfg: AppConfig) -> None:
         "quality_threshold": cfg.quality_threshold,
         "context_compress_retries": cfg.context_compress_retries,
         "keep_tool_results": cfg.keep_tool_results,
+        "log_level": cfg.log_level,
     }
 
     with open(CONFIG_PATH, "w") as f:

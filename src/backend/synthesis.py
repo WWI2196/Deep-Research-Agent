@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -121,6 +122,34 @@ async def _generate_failure_summary(
         )
 
 
+def _trim_reports_by_whole(reports: list[str], max_chars: int) -> str:
+    """Trim reports by dropping whole reports from the end until total fits max_chars.
+
+    Keeps each remaining report intact to preserve inline citations and structure.
+    """
+    if not reports:
+        return ""
+    separator = "\n\n---\n\n"
+    # Try including all reports first
+    combined = separator.join(reports)
+    if len(combined) <= max_chars:
+        return combined
+    # Drop shortest reports first to keep maximum number of reports whole
+    indexed = sorted(enumerate(reports), key=lambda x: len(x[1]))
+    dropped: set[int] = set()
+    for idx, _ in indexed:
+        remaining = [reports[i] for i in range(len(reports)) if i not in dropped]
+        if not remaining:
+            break
+        combined = separator.join(remaining)
+        if len(combined) <= max_chars:
+            return combined
+        dropped.add(idx)
+    # Fallback: keep at least the longest report
+    longest = max(reports, key=len)
+    return longest[:max_chars]
+
+
 async def synthesize_report(
     user_query: str,
     research_plan: str,
@@ -145,9 +174,15 @@ async def synthesize_report(
     methodology = plan.get("methodology", "")
     output_structure = json.dumps(plan.get("output_structure", []))
 
-    combined = "\n\n---\n\n".join(valid_reports)
+    # Pre-extract all inline citations from sub-agent reports for later recovery
+    _src_pattern = re.compile(r'\[src:\s*((?:https?://|file://)[^\]]+)\]')
+    _all_subagent_citations: set[str] = set()
+    for r in valid_reports:
+        _all_subagent_citations.update(_src_pattern.findall(r))
+    logger.info("Pre-extracted %d unique citations from sub-agent reports", len(_all_subagent_citations))
+
     max_input_chars = 60000
-    report_input = combined[:max_input_chars]
+    report_input = _trim_reports_by_whole(valid_reports, max_input_chars)
 
     final_report = ""
     for attempt in range(3):
@@ -188,13 +223,13 @@ async def synthesize_report(
             logger.warning("Synthesis attempt %d too short (%d chars), retrying...",
                          attempt + 1, len(result))
             max_input_chars = int(max_input_chars * 0.7)
-            report_input = combined[:max_input_chars]
+            report_input = _trim_reports_by_whole(valid_reports, max_input_chars)
 
         except Exception as e:
             lower = str(e).lower()
             if "400" in lower or "too long" in lower or "max" in lower:
                 max_input_chars = int(max_input_chars * 0.6)
-                report_input = combined[:max_input_chars]
+                report_input = _trim_reports_by_whole(valid_reports, max_input_chars)
                 logger.warning("Synthesis attempt %d context error, reducing to %d chars",
                              attempt + 1, max_input_chars)
                 continue
@@ -211,6 +246,15 @@ async def synthesize_report(
             f"## Conclusions\n\nKey findings are presented in the sections above.\n"
         )
 
+    # Log how many citations survived synthesis
+    _survived = set(_src_pattern.findall(final_report))
+    _dropped = _all_subagent_citations - _survived
+    if _dropped:
+        logger.warning("Synthesis dropped %d/%d citations; will recover in add_citations",
+                     len(_dropped), len(_all_subagent_citations))
+    else:
+        logger.info("All %d pre-extracted citations survived synthesis", len(_all_subagent_citations))
+
     return final_report
 
 
@@ -225,7 +269,10 @@ def _normalize_url(url: str) -> str:
 
 
 def _domain_from_url(url: str) -> str:
-    """Extract a short domain label from a URL for use as fallback title."""
+    """Extract a short domain label or file name from a URL for use as fallback title."""
+    if url.startswith("file://"):
+        name = Path(url).name
+        return name or "Local Document"
     try:
         domain = urlparse(url).netloc.replace("www.", "")
         return domain or url[:60]
@@ -246,6 +293,9 @@ async def _verify_citation_urls(urls: list[str]) -> dict[str, bool]:
 
     async def _check_one(url: str) -> tuple[str, bool]:
         async with semaphore:
+            if url.startswith("file://"):
+                path = Path(url[7:])
+                return url, await asyncio.to_thread(path.exists)
             try:
                 text = await asyncio.wait_for(
                     asyncio.to_thread(search_mod.extract, url),
@@ -265,6 +315,29 @@ async def _verify_citation_urls(urls: list[str]) -> dict[str, bool]:
     return results
 
 
+# Patterns to strip existing reference/source sections added by LLMs
+_REF_SECTION_PATTERNS = [
+    r'\n##+\s*References\s*\n.*?(?=\n##|\Z)',
+    r'\n##+\s*Sources\s*\n.*?(?=\n##|\Z)',
+    r'\n##+\s*Bibliography\s*\n.*?(?=\n##|\Z)',
+    r'\n##+\s*参考文献\s*\n.*?(?=\n##|\Z)',
+]
+
+
+def _strip_existing_ref_sections(report: str) -> str:
+    """Remove any LLM-generated References/Sources sections to avoid duplication."""
+    original = report
+    for pattern in _REF_SECTION_PATTERNS:
+        report = re.sub(pattern, '\n', report, flags=re.DOTALL)
+    # Guard: for reports >200 chars, if stripping removed >50% of content,
+    # the model may have placed a reference heading mid-report.
+    if len(original) > 200 and len(report) < len(original) * 0.5:
+        logger.warning("_strip_existing_ref_sections removed >50%% of report (%d -> %d chars); skipping strip",
+                     len(original), len(report))
+        return original.rstrip()
+    return report.rstrip()
+
+
 async def add_citations(
     report: str, sources: list[dict[str, Any]],
 ) -> tuple[str, dict[str, bool]]:
@@ -273,8 +346,9 @@ async def add_citations(
     Returns (cited_report, verification_map) where verification_map is {url: accessible_bool}.
     """
     report = re.sub(r'\[[a-z0-9]+_[a-z0-9_]+\]\s*', '', report)
+    report = _strip_existing_ref_sections(report)
 
-    src_pattern = re.compile(r'\[src:\s*(https?://[^\]]+)\]')
+    src_pattern = re.compile(r'\[src:\s*((?:https?://|file://)[^\]]+)\]')
     raw_matches = src_pattern.findall(report)
 
     if not raw_matches:
@@ -336,6 +410,33 @@ async def add_citations(
     footer = f"\n\n---\n*Citation check: {accessible}/{total} URLs accessible*"
     cited_report += footer
 
+    # Recovery: append sources that were used by sub-agents but dropped by synthesis
+    _cited_normalized = set(seen.keys())
+    uncited: list[dict[str, Any]] = []
+    for s in sources:
+        u = _normalize_url(s.get("url", ""))
+        if u and u not in _cited_normalized:
+            uncited.append(s)
+
+    if uncited:
+        doc_uncited = [s for s in uncited if str(s.get("url", "")).startswith("file://")]
+        web_uncited = [s for s in uncited if not str(s.get("url", "")).startswith("file://")]
+        extra = "\n\n---\n*Additional sources used by sub-agents but not directly cited above:*\n"
+        if doc_uncited:
+            extra += "\n**Document Library**\n"
+            for s in doc_uncited:
+                url = s.get("url", "")
+                title = s.get("title", "") or _domain_from_url(url)
+                extra += f"- [{title}]({url})\n"
+        if web_uncited:
+            extra += "\n**Web Sources**\n"
+            for s in web_uncited:
+                url = s.get("url", "")
+                title = s.get("title", "") or _domain_from_url(url)
+                extra += f"- [{title}]({url})\n"
+        cited_report += extra
+        logger.info("Recovered %d uncited sources in References", len(uncited))
+
     return cited_report, verification
 
 
@@ -343,14 +444,27 @@ def _append_source_list(report: str, sources: list[dict[str, Any]]) -> str:
     if not sources:
         return report
     seen_urls: set[str] = set()
-    refs = "\n\n## Sources\n\n"
-    idx = 1
+    doc_sources: list[tuple[str, str]] = []
+    web_sources: list[tuple[str, str]] = []
     for s in sources:
         url = str(s.get("url", "")).strip()
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
-        title = s.get("title", "Source")
-        refs += f"{idx}. [{title}]({url})\n"
-        idx += 1
+        title = s.get("title", "Source") or _domain_from_url(url)
+        if url.startswith("file://"):
+            doc_sources.append((title, url))
+        else:
+            web_sources.append((title, url))
+
+    refs = ""
+    if doc_sources:
+        refs += "\n\n## Document Library Sources\n\n"
+        for idx, (title, url) in enumerate(doc_sources, start=1):
+            refs += f"{idx}. [{title}]({url})\n"
+    if web_sources:
+        refs += "\n\n## Web Sources\n\n"
+        offset = len(doc_sources) + 1
+        for idx, (title, url) in enumerate(web_sources, start=offset):
+            refs += f"{idx}. [{title}]({url})\n"
     return report + refs

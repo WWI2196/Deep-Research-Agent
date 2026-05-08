@@ -2,34 +2,49 @@
 
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import get_config, reload_config, save_config
+from .document_store import DocumentStore
 from .export import export_markdown
 from .graph import build_and_run_graph
-from .models import ConfigUpdateRequest, ResearchRequest, ResearchResponse
+from .models import (
+    CollectionCreateRequest,
+    CollectionUpdateRequest,
+    ConfigUpdateRequest,
+    ResearchRequest,
+    ResearchResponse,
+)
 from .persistence import (
     delete_run,
+    get_latest_checkpoint,
     get_report_content,
+    get_run_by_id,
     get_run_history,
+    get_run_logs,
+    get_run_llm_calls,
     get_run_report,
+    get_run_timeline,
     init_db,
+    persist_run,
     update_run_status,
 )
 
 load_dotenv()
 
 app = FastAPI(title="Deep Research Agent", version="1.0.0")
-
+logger = logging.getLogger(__name__)
 
 active_runs: dict[str, dict] = {}
 _cancel_flags: dict[str, asyncio.Event] = {}
+_doc_store = DocumentStore()
 
 
 def serialize_event(event_type: str, data: dict) -> str:
@@ -69,15 +84,73 @@ async def startup():
     init_db()
 
 
+async def _run_research(state: dict[str, Any], run_id: str) -> None:
+    """Background task wrapper that executes the research graph."""
+    try:
+        async def _noop_event(evt: dict[str, Any]) -> None:
+            pass
+
+        final_state = await build_and_run_graph(
+            state, _noop_event, cancel_event=_cancel_flags.get(run_id),
+        )
+
+        final_content = final_state.get("cited_report") or final_state.get("report", "")
+        report_path = ""
+        if final_content:
+            report_path = export_markdown(final_content)
+
+        source_count = len(final_state.get("sources", []))
+        report_count = len(final_state.get("subagent_reports", []))
+        iterations = final_state.get("iteration_count", 0)
+
+        await update_run_status(
+            run_id, "completed",
+            total_sources=source_count,
+            total_reports=report_count,
+            iterations=iterations,
+            report_path=report_path,
+        )
+    except asyncio.CancelledError:
+        await update_run_status(run_id, "cancelled")
+        raise
+    except Exception as e:
+        logger.exception("Research task failed: %s", e)
+        await update_run_status(run_id, "failed")
+    finally:
+        _cancel_flags.pop(run_id, None)
+        active_runs.pop(run_id, None)
+
+
 @app.post("/api/research")
 async def start_research(request: ResearchRequest) -> ResearchResponse:
     run_id = os.urandom(8).hex()
-    active_runs[run_id] = {"query": request.query, "status": "started"}
     _cancel_flags[run_id] = asyncio.Event()
+    cfg = get_config()
+
+    state = {
+        "user_query": request.query,
+        "run_id": run_id,
+        "events": [],
+        "errors": [],
+        "max_iterations": request.max_iterations or cfg.max_iterations,
+        "quality_threshold": request.quality_threshold or cfg.quality_threshold,
+        "context_compress_retries": request.context_compress_retries or cfg.context_compress_retries,
+        "keep_tool_results": request.keep_tool_results or cfg.keep_tool_results,
+        "document_collections": request.document_collections or [],
+    }
+
+    task = asyncio.create_task(_run_research(state, run_id))
+    active_runs[run_id] = {
+        "query": request.query,
+        "status": "running",
+        "task": task,
+    }
+
+    await persist_run(run_id, request.query, cfg.default_provider, cfg.default_model)
     return ResearchResponse(run_id=run_id, status="started")
 
 
-@app.post("/api/research/stream")
+@app.post("/api/research/stream", include_in_schema=False)
 async def stream_research(request: ResearchRequest):
     run_id = os.urandom(8).hex()
     _cancel_flags[run_id] = asyncio.Event()
@@ -107,6 +180,7 @@ async def stream_research(request: ResearchRequest):
                 "quality_threshold": request.quality_threshold or cfg.quality_threshold,
                 "context_compress_retries": request.context_compress_retries or cfg.context_compress_retries,
                 "keep_tool_results": request.keep_tool_results or cfg.keep_tool_results,
+                "document_collections": request.document_collections or [],
             }
 
             graph_task = asyncio.create_task(
@@ -185,6 +259,9 @@ async def cancel_research(run_id: str):
     flag = _cancel_flags.get(run_id)
     if flag:
         flag.set()
+        entry = active_runs.get(run_id)
+        if entry and "task" in entry:
+            entry["task"].cancel()
         return {"status": "cancelled", "run_id": run_id}
     raise HTTPException(status_code=404, detail="Research run not found")
 
@@ -192,6 +269,42 @@ async def cancel_research(run_id: str):
 @app.get("/api/research/history")
 async def history(limit: int = 20):
     return {"history": get_run_history(limit)}
+
+
+@app.get("/api/research/{run_id}/status")
+async def get_research_status(run_id: str):
+    run = get_run_by_id(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Research run not found")
+
+    checkpoint = get_latest_checkpoint(run_id)
+    phase = checkpoint.get("phase", "") if checkpoint else ""
+    state = checkpoint.get("state", {}) if checkpoint else {}
+
+    # Approximate progress mapping based on phase
+    progress_percent = 0
+    phase_progress = {
+        "init": 5, "plan": 15, "split": 25,
+        "subagents": 60, "reflection": 75, "synthesize": 90, "cite": 95,
+    }
+    for key, pct in phase_progress.items():
+        if phase.startswith(key):
+            progress_percent = pct
+            break
+
+    active = run_id in active_runs
+
+    return {
+        "run_id": run_id,
+        "status": run.get("status", "unknown"),
+        "phase": phase,
+        "progress_percent": progress_percent,
+        "iteration": state.get("iteration_count", 0),
+        "total_reports": len(state.get("subagent_reports", [])),
+        "total_sources": len(state.get("sources", [])),
+        "query": run.get("query", ""),
+        "active": active,
+    }
 
 
 @app.delete("/api/research/{run_id}")
@@ -222,6 +335,7 @@ async def get_app_config():
         "quality_threshold": cfg.quality_threshold,
         "context_compress_retries": cfg.context_compress_retries,
         "keep_tool_results": cfg.keep_tool_results,
+        "log_level": cfg.log_level,
         "providers": visible,
         "available_providers": list(visible.keys()),
         "roles": cfg.to_dict().get("roles", {}),
@@ -243,6 +357,8 @@ async def update_config(request: ConfigUpdateRequest):
         cfg.context_compress_retries = request.context_compress_retries
     if request.keep_tool_results is not None:
         cfg.keep_tool_results = request.keep_tool_results
+    if request.log_level is not None:
+        cfg.log_level = request.log_level
     if request.roles:
         from .config import RoleConfig
         for role_name, role_data in request.roles.items():
@@ -270,6 +386,139 @@ async def list_models():
     cfg = get_config()
     visible = {name: {"type": pc.type} for name, pc in cfg.providers.items() if pc.api_key}
     return {"providers": list(visible.keys()), "details": visible}
+
+
+# ── Tracing / Logs ──────────────────────────────────────────────
+
+@app.get("/api/research/{run_id}/logs")
+async def get_logs(run_id: str, phase: str = "", level: str = "", event_type: str = "", limit: int = 500):
+    logs = get_run_logs(
+        run_id,
+        phase=phase or None,
+        level=level or None,
+        event_type=event_type or None,
+        limit=limit,
+    )
+    return {"run_id": run_id, "logs": logs}
+
+
+@app.get("/api/research/{run_id}/llm-calls")
+async def get_llm_calls(run_id: str, role: str = "", limit: int = 500):
+    calls = get_run_llm_calls(run_id, role=role or None, limit=limit)
+    return {"run_id": run_id, "calls": calls}
+
+
+@app.get("/api/research/{run_id}/timeline")
+async def get_timeline(run_id: str, limit: int = 1000):
+    items = get_run_timeline(run_id, limit=limit)
+    return {"run_id": run_id, "items": items}
+
+
+# ── Document collections ────────────────────────────────────────
+
+@app.get("/api/collections")
+async def get_collections():
+    collections = await _doc_store.list_collections()
+    return {"collections": collections}
+
+
+@app.post("/api/collections")
+async def create_collection(request: CollectionCreateRequest):
+    collection = await _doc_store.create_collection(request.name, request.description)
+    return collection
+
+
+@app.delete("/api/collections/{collection_id}")
+async def delete_collection(collection_id: str):
+    success = await _doc_store.delete_collection(collection_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return {"status": "deleted", "id": collection_id}
+
+
+@app.patch("/api/collections/{collection_id}")
+async def update_collection(collection_id: str, request: CollectionUpdateRequest):
+    # TODO: implement name/description update
+    return {"status": "not_implemented", "id": collection_id}
+
+
+@app.get("/api/collections/{collection_id}/documents")
+async def get_documents(collection_id: str):
+    documents = await _doc_store.list_documents(collection_id)
+    return {"documents": documents}
+
+
+@app.post("/api/collections/{collection_id}/documents")
+async def upload_document(collection_id: str, file: UploadFile = File(...)):
+    import tempfile
+
+    suffix = Path(file.filename or "upload").suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        content = await file.read()
+        tmp.write(content)
+        tmp_path = Path(tmp.name)
+
+    try:
+        result = await _doc_store.add_document(
+            collection_id=collection_id,
+            file_path=tmp_path,
+            name=file.filename or "unnamed",
+        )
+        if not result["success"]:
+            raise HTTPException(status_code=422, detail=result.get("error", "Parse failed"))
+        return result
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+@app.delete("/api/collections/{collection_id}/documents/{doc_id}")
+async def delete_document(collection_id: str, doc_id: str):
+    success = await _doc_store.delete_document(collection_id, doc_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"status": "deleted", "id": doc_id}
+
+
+@app.get("/api/collections/{collection_id}/documents/{doc_id}/download")
+async def download_document(collection_id: str, doc_id: str):
+    from fastapi.responses import FileResponse
+
+    doc_dir = Path.home() / ".deep-research" / "docs" / collection_id
+    if not doc_dir.exists():
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    for p in doc_dir.iterdir():
+        if p.stem == doc_id:
+            return FileResponse(str(p), filename=p.name)
+
+    raise HTTPException(status_code=404, detail="Document not found")
+
+
+@app.post("/api/collections/{collection_id}/search")
+async def search_collection(collection_id: str, body: dict):
+    query = body.get("query", "")
+    top_k = body.get("top_k", 10)
+    category = body.get("category")
+    if not query:
+        raise HTTPException(status_code=422, detail="query is required")
+    results = await _doc_store.query([collection_id], query, top_k=top_k, category_filter=category)
+    return {"results": results}
+
+
+@app.post("/api/collections/{collection_id}/reindex")
+async def reindex_collection(collection_id: str):
+    result = await _doc_store.reindex_collection(collection_id)
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result.get("error", "Reindex failed"))
+    return result
+
+
+@app.post("/api/collections/{collection_id}/documents/{doc_id}/reindex")
+async def reindex_document(collection_id: str, doc_id: str):
+    result = await _doc_store.reindex_document(collection_id, doc_id)
+    if not result["success"]:
+        raise HTTPException(status_code=404, detail=result.get("error", "Document not found"))
+    return result
 
 
 HERE = Path(__file__).parent          # src/backend/

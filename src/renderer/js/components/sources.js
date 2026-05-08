@@ -27,10 +27,14 @@ function renderSourcesPanel() {
   const sourceRows = sorted.slice(0, 15).map(s => {
     const pct = Math.round((s.score || 0) * 100);
     const cls = pct >= 70 ? 'high' : pct >= 40 ? 'mid' : 'low';
+    const isDoc = s.source === 'document' || (s.url || '').startsWith('file://');
+    const icon = isDoc ? '📄' : '🌐';
+    const displayUrl = isDoc ? (s.title || 'Local Document') : getDomain(s.url);
     return `
       <div class="source-row">
         <div class="quality-bar"><div class="quality-fill ${cls}" style="width:${pct}%"></div></div>
-        <a class="source-url" href="${s.url}" title="${escapeHtml(s.title || s.url)}">${escapeHtml(truncate(s.title || getDomain(s.url), 40))}</a>
+        <span class="source-icon">${icon}</span>
+        <a class="source-url" href="${s.url}" title="${escapeHtml(s.title || s.url)}" ${isDoc ? 'target="_blank"' : ''}>${escapeHtml(truncate(s.title || displayUrl, 36))}</a>
       </div>
     `;
   }).join('');

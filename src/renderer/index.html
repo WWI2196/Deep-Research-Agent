@@ -17,6 +17,7 @@
         <button class="nav-btn" data-page="dashboard" style="display:none" id="nav-dashboard">Progress</button>
         <button class="nav-btn" data-page="report" style="display:none" id="nav-report">Report</button>
         <button class="nav-btn" data-page="history">History</button>
+        <button class="nav-btn" data-page="library">Library</button>
         <button class="nav-btn" data-page="settings">Settings</button>
       </nav>
     </header>
@@ -40,6 +41,16 @@
           <div class="option-group">
             <label>模型</label>
             <select id="model-select" class="select"></select>
+          </div>
+        </div>
+        <div class="input-collapsible" id="collection-toggle">
+          <button class="collapsible-header" id="btn-toggle-collections">
+            <span>Document Libraries</span>
+            <span class="chevron" id="collection-chevron">▸</span>
+          </button>
+          <div class="collapsible-body" id="collection-panel" style="display:none">
+            <div id="collection-checkboxes" class="collection-checkboxes">Loading...</div>
+            <div id="selected-collections" class="selected-collections"></div>
           </div>
         </div>
         <button id="btn-start" class="btn-primary">开始研究</button>
@@ -93,6 +104,33 @@
       </div>
     </main>
 
+    <!-- Page: Library -->
+    <main id="page-library" class="page">
+      <div class="library-container">
+        <div class="library-layout">
+          <aside class="library-sidebar">
+            <div class="library-header">
+              <h2 class="section-title">Document Libraries</h2>
+              <button id="btn-new-collection" class="btn-primary" style="font-size:12px;padding:6px 12px">+ New</button>
+            </div>
+            <div id="collections-list" class="collections-list"></div>
+          </aside>
+          <section class="library-main">
+            <div class="library-toolbar">
+              <h3 id="library-title" class="section-title">Select a library</h3>
+              <div id="library-actions" class="library-actions" style="display:none">
+                <button id="btn-upload-doc" class="btn-secondary" style="font-size:12px">Upload</button>
+                <button id="btn-reindex-collection" class="btn-secondary" style="font-size:12px">Re-index</button>
+                <button id="btn-delete-collection" class="btn-danger" style="font-size:12px">Delete</button>
+              </div>
+            </div>
+            <div id="documents-list" class="documents-list"></div>
+            <input type="file" id="file-upload-input" style="display:none" accept=".pdf,.docx,.doc,.txt,.md,.html,.htm">
+          </section>
+        </div>
+      </div>
+    </main>
+
     <!-- Page: Settings -->
     <main id="page-settings" class="page">
       <div class="settings-container">
@@ -108,12 +146,14 @@
   <script src="js/store.js"></script>
   <script src="js/app.js"></script>
   <script src="js/components/input.js"></script>
+  <script src="js/components/library.js"></script>
   <script src="js/components/sources.js"></script>
   <script src="js/components/phases.js"></script>
   <script src="js/components/subagents.js"></script>
   <script src="js/components/dashboard.js"></script>
   <script src="js/components/report.js"></script>
   <script src="js/components/history.js"></script>
+  <script src="js/components/log-viewer.js"></script>
   <script src="js/components/settings.js"></script>
 </body>
 </html>

@@ -15,6 +15,12 @@ function renderReportPage() {
     `;
   }
 
+  // Attach log viewer if we have a run id
+  const runId = store.get('currentRunId');
+  if (runId) {
+    attachLogViewerToReport(runId);
+  }
+
   // Export buttons
   document.getElementById('btn-export-md').onclick = () => {
     const text = store.get('citedReport') || store.get('reportDraft') || '';
@@ -69,6 +75,7 @@ function renderSourcesInReportSidebar() {
 async function viewHistoryReport(runId) {
   try {
     const report = await fetchReport(runId);
+    store.set('currentRunId', runId);
     store.set('citedReport', report.content || '');
     store.set('reportDraft', '');
     store.set('completionStats', {

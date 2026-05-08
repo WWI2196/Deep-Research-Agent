@@ -42,3 +42,4 @@ research:
   quality_threshold: 0.7
   max_sources_per_domain: 3
   tool_calls_per_subagent: 15
+  log_level: debug

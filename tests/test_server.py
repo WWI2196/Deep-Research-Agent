@@ -77,13 +77,28 @@ def test_start_research(client):
 # ── Cancel research ────────────────────────────────────────────
 
 def test_cancel_research_existing(client):
-    # Start a research first
-    start_resp = client.post("/api/research", json={"query": "test"})
-    run_id = start_resp.json()["run_id"]
+    import asyncio
+    from unittest.mock import patch
 
-    response = client.post(f"/api/research/{run_id}/cancel")
-    assert response.status_code == 200
-    assert response.json()["status"] == "cancelled"
+    # TestClient cancels dangling asyncio tasks when a request returns,
+    # so we stub out create_task to keep the run entry alive.
+    class FakeTask:
+        def __init__(self, coro):
+            self._coro = coro
+            self._cancelled = False
+
+        def cancel(self):
+            self._cancelled = True
+
+    with patch("src.backend.server.asyncio.create_task", side_effect=FakeTask) as mock_create_task:
+        start_resp = client.post("/api/research", json={"query": "test"})
+        run_id = start_resp.json()["run_id"]
+
+        response = client.post(f"/api/research/{run_id}/cancel")
+        assert response.status_code == 200
+        assert response.json()["status"] == "cancelled"
+        # Verify the endpoint called cancel() on the background task
+        assert mock_create_task.return_value._cancelled
 
 
 def test_cancel_research_not_found(client):
