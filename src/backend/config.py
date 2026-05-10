@@ -74,7 +74,7 @@ class AppConfig:
     default_provider: str = "openai"
     default_model: str = "gpt-4o"
     max_iterations: int = 3
-    quality_threshold: float = 0.7
+    quality_threshold: float = 0.65
     max_sources_per_domain: int = 3
     tool_calls_per_subagent: int = 15
     context_compress_retries: int = 1
@@ -85,6 +85,7 @@ class AppConfig:
     min_source_per_type: dict[str, int] = field(default_factory=lambda: {"document": 1, "web": 2})
     log_level: str = "info"
     roles: dict[str, RoleConfig] = field(default_factory=dict)
+    agentic_rag_enabled: bool = True
 
     def get_role(self, name: str) -> RoleConfig:
         if name in self.roles:
@@ -107,6 +108,7 @@ class AppConfig:
             "source_type_quotas": self.source_type_quotas,
             "min_source_per_type": self.min_source_per_type,
             "log_level": self.log_level,
+            "agentic_rag_enabled": self.agentic_rag_enabled,
             "roles": {
                 name: {"provider": rc.provider, "model": rc.model}
                 for name, rc in self.roles.items()
@@ -257,7 +259,7 @@ def load_config() -> AppConfig:
         default_provider=default_provider,
         default_model=default_model,
         max_iterations=_research_int("MAX_ITERATIONS", "max_iterations", 3),
-        quality_threshold=_research_float("QUALITY_THRESHOLD", "quality_threshold", 0.7),
+        quality_threshold=_research_float("QUALITY_THRESHOLD", "quality_threshold", 0.6),
         max_sources_per_domain=_research_int("MAX_SOURCES_PER_DOMAIN", "max_sources_per_domain", 3),
         tool_calls_per_subagent=_research_int("TOOL_CALLS_PER_SUBAGENT", "tool_calls_per_subagent", 15),
         context_compress_retries=_research_int("CONTEXT_COMPRESS_RETRIES", "context_compress_retries", 1),
@@ -271,6 +273,10 @@ def load_config() -> AppConfig:
             or research_yaml.get("log_level", "")
             or "info"
         ).lower(),
+        agentic_rag_enabled=(
+            os.getenv("AGENTIC_RAG_ENABLED", "").lower() in ("1", "true", "yes")
+            or research_yaml.get("agentic_rag_enabled", False) is True
+        ),
     )
 
     # ── Role overrides: env > yaml > (follow default) ──

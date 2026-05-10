@@ -159,7 +159,7 @@ def test_research_params_defaults():
         from src.backend.config import load_config
         cfg = load_config()
         assert cfg.max_iterations == 3
-        assert cfg.quality_threshold == 0.7
+        assert cfg.quality_threshold == 0.6
         assert cfg.max_sources_per_domain == 3
         assert cfg.tool_calls_per_subagent == 15
 

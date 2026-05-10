@@ -39,7 +39,7 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
   - `planning.py` — Planning-phase agents: `generate_research_plan` (structured JSON), `split_into_subtasks` (self-heal retry)
   - `subagent.py` — Subagent orchestration: fuzzy-dedup `generate_search_queries`, `batch_evaluate_sources` (merged score+select), `run_subagent` (query cache, empty-result rollback, evidence compression, [src:] marker validation), `run_subagents_parallel`. New: `_search_document_collections()` parallel document hybrid retrieval.
   - `synthesis.py` — Synthesis: `synthesize_report` (single-pass + truncation continuation + failure summary retry), `add_citations` (rule-based [src: url] → [^n] + URL liveness verification + auto strip duplicate References), `_generate_failure_summary`
-  - `search.py` — SearXNG search + trafilatura content extraction
+  - `search.py` — SearXNG search + dual-path content extraction (`requests` + `trafilatura` fast path; `Crawl4AI` browser-render fallback for JS-heavy pages)
   - `prompts.py` — System prompt templates for 6 roles + evaluation. Subagent/Synthesis prompts removed automatic Sources/References generation, use inline citations only.
   - `persistence.py` — SQLite persistence (runs, checkpoints, sources, subagent_reports, **collections, documents**). All I/O via `asyncio.to_thread`.
   - `export.py` — Markdown export
@@ -52,10 +52,13 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
   - **New**: `library.js` — Document library management page (create/delete/upload/reindex)
   - **New**: `log-viewer.js` — Debug log viewer with phase/type filters, search, expandable details, and LLM-call latency display. Attachable to report page and history rows.
   - Infrastructure: `app.js` (router + page lifecycle), `api.js` (HTTP+SSE), `store.js` (`createStore()` event-driven state)
-- `tests/` — pytest suite (194 backend tests)
+- `tests/` — pytest suite (218 backend tests)
   - `test_providers/` — Provider tests (anthropic, openai_compatible, factory)
   - **New**: `test_document_store.py` — DocumentStore CRUD + hybrid retrieval tests
   - **New**: `test_tracing.py` — Tracing contextvar and trace log level filtering tests
+  - **New**: `test_search.py` — Search + extract (trafilatura + Crawl4AI fallback) tests
+  - **New**: `test_tools.py` — Research tools (search, evaluate, fetch_fulltext, synthesize, report) tests
+  - **New**: `test_react_agent.py` — ReAct agent loop tests
 
 **Pipeline**: LangGraph `StateGraph` with **7 async nodes** in [src/backend/graph.py](src/backend/graph.py). Flow: `init → plan → split → subagents → reflection → (loop or proceed) → synthesize → cite → END`. Scale node removed; budget per subtask via `estimated_searches` field. New: synthesis retry on truncation/low-quality with failure summary; cite node runs concurrent URL liveness check.
 
@@ -63,7 +66,7 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 
 **LLM routing** ([src/backend/config.py](src/backend/config.py)): Priority chain: env var > `~/.deep-research/config.yaml` > built-in default. 7 roles (planner, splitter, subagent, evaluator, coordinator, reflection, citation) can each use a different provider+model. Config supports `${VAR}` env substitution. Six built-in providers: mimo, openai, anthropic, gemini, deepseek, openrouter.
 
-**Search** ([src/backend/search.py](src/backend/search.py)): SearXNG (self-hosted, 70+ engines aggregated) via JSON API at `http://127.0.0.1:8080`. No API key needed. Content extraction via trafilatura (free, pip-installable) — fetches page HTML and extracts clean markdown.
+**Search** ([src/backend/search.py](src/backend/search.py)): SearXNG (self-hosted, 70+ engines aggregated) via JSON API at `http://127.0.0.1:8080`. No API key needed. Content extraction: `requests.get` + `trafilatura.extract` for fast path; `Crawl4AI` (`AsyncWebCrawler` with playwright Chromium / system Chrome fallback) for JS-rendered pages.
 
 **RAG / Document Library** ([src/backend/document_store.py](src/backend/document_store.py)):
 - **Vector DB**: Chroma (file-persistent, `~/.deep-research/chroma/`)
@@ -81,7 +84,7 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 - `split_into_subtasks`: Self-heal — JSON parse failure feeds error back to LLM for retry; falls back to dimension-per-subtask
 - `generate_search_queries`: **Rules-based** (no LLM) — keywords × source_type modifiers + fuzzy Jaccard dedup. Fallback to title if no keywords.
 - `batch_evaluate_sources`: Single LLM call per batch — scores quality AND decides full_text in one response (merged SOURCE_EVALUATE prompt)
-- `run_subagent`: 6-step flow — rules queries → SearXNG search (query cache + empty-result rollback) + **document library hybrid search** → evaluate+select → trafilatura extract → build evidence (keep_tool_results compression) → write report with `[src: url]` markers. Retries on empty report or missing citations.
+- `run_subagent`: 6-step flow — rules queries → SearXNG search (query cache + empty-result rollback) + **document library hybrid search** → evaluate+select → `extract_async()` (trafilatura fast path + Crawl4AI browser fallback) → build evidence (keep_tool_results compression) → write report with `[src: url]` markers. Retries on empty report or missing citations.
 - `synthesize_report`: Single-pass LLM with max_tokens=16384, 6-round truncation continuation, failure_summary inject for retry. Fallback to concatenation.
 - `add_citations`: **Rule-based** (no LLM) — parses `[src: url]`, normalizes URLs, deduplicates, assigns `[^n]`, generates References, concurrently verifies URL accessibility via trafilatura, marks unverified sources. **Auto strips duplicate References/Sources sections generated by LLM**.
 - `_generate_failure_summary`: Generates compact post-mortem for synthesis retry (what happened, covered, missing, remaining findings)
@@ -142,6 +145,6 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 
 - SearXNG must be running for search to work (`docker compose up -d` in `~/searxng/`)
 - Start server with `uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787`, then open `http://127.0.0.1:8787` in browser
-- All changes must maintain 194 Python tests passing
-- trafilatura is the only content extraction method — no paid alternatives
+- All changes must maintain 218 Python tests passing
+- Content extraction: `requests` + `trafilatura` fast path, `Crawl4AI` browser-render fallback for JS-heavy pages; no paid scraping APIs
 - `save_config()` must preserve `providers` and other unmanaged sections in config.yaml

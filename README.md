@@ -11,6 +11,7 @@ A multi-agent deep research system that plans, searches, reads, reflects, and sy
 - Python 3.12+ with [uv](https://docs.astral.sh/uv/)
 - Docker (for SearXNG)
 - An LLM API key (OpenRouter, Mimo, or any OpenAI-compatible provider)
+- (Optional) Google Chrome or Chromium — for Crawl4AI fallback on JS-rendered pages. If missing, run `playwright install chromium` after `uv sync`.
 
 ### 1. Clone and install
 
@@ -40,7 +41,7 @@ roles:
 
 research:
   max_iterations: 2
-  quality_threshold: 0.7
+  quality_threshold: 0.6
 ```
 
 Or use environment variables:
@@ -96,7 +97,7 @@ Documents are parsed, chunked, embedded, and indexed asynchronously. During rese
 ## Testing
 
 ```bash
-uv run pytest tests/ -v    # 194 backend tests
+uv run pytest tests/ -v    # 218 backend tests
 ```
 
 ## License

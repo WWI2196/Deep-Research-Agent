@@ -472,7 +472,7 @@ def get_run_logs(
     phase: str | None = None,
     level: str | None = None,
     event_type: str | None = None,
-    limit: int = 500,
+    limit: int = 2000,
 ) -> list[dict[str, Any]]:
     conn = _get_conn()
     query = "SELECT * FROM trace_logs WHERE run_id=?"
@@ -496,7 +496,7 @@ def get_run_logs(
 def get_run_llm_calls(
     run_id: str,
     role: str | None = None,
-    limit: int = 500,
+    limit: int = 2000,
 ) -> list[dict[str, Any]]:
     conn = _get_conn()
     query = "SELECT * FROM llm_calls WHERE run_id=?"
@@ -511,7 +511,7 @@ def get_run_llm_calls(
     return [dict(r) for r in rows]
 
 
-def get_run_timeline(run_id: str, limit: int = 1000) -> list[dict[str, Any]]:
+def get_run_timeline(run_id: str, limit: int = 3000) -> list[dict[str, Any]]:
     """Merge trace_logs and llm_calls into a single chronological timeline."""
     conn = _get_conn()
     rows = conn.execute(

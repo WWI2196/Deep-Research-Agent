@@ -1,6 +1,7 @@
 """Unified async LLM call routing with provider caching."""
 
 import asyncio
+import datetime
 import logging
 import time
 
@@ -54,6 +55,13 @@ async def chat(
     role_cfg = get_config().get_role(role)
     provider = _get_or_create_provider(role_cfg.provider)
     temp = temperature if temperature is not None else role_cfg.temperature
+
+    today = datetime.date.today().isoformat()
+    date_prefix = f"Today's date: {today}. Use this as the current date when reasoning about time-sensitive topics."
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = messages[0]["content"] + "\n\n" + date_prefix
+    else:
+        messages = [{"role": "system", "content": date_prefix}, *messages]
 
     for attempt in range(max_retries):
         start = time.monotonic()

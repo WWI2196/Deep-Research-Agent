@@ -407,7 +407,7 @@ async def list_models():
 # ── Tracing / Logs ──────────────────────────────────────────────
 
 @app.get("/api/research/{run_id}/logs")
-async def get_logs(run_id: str, phase: str = "", level: str = "", event_type: str = "", limit: int = 500):
+async def get_logs(run_id: str, phase: str = "", level: str = "", event_type: str = "", limit: int = 2000):
     logs = get_run_logs(
         run_id,
         phase=phase or None,
@@ -419,13 +419,13 @@ async def get_logs(run_id: str, phase: str = "", level: str = "", event_type: st
 
 
 @app.get("/api/research/{run_id}/llm-calls")
-async def get_llm_calls(run_id: str, role: str = "", limit: int = 500):
+async def get_llm_calls(run_id: str, role: str = "", limit: int = 2000):
     calls = get_run_llm_calls(run_id, role=role or None, limit=limit)
     return {"run_id": run_id, "calls": calls}
 
 
 @app.get("/api/research/{run_id}/timeline")
-async def get_timeline(run_id: str, limit: int = 1000):
+async def get_timeline(run_id: str, limit: int = 3000):
     items = get_run_timeline(run_id, limit=limit)
     return {"run_id": run_id, "items": items}
 

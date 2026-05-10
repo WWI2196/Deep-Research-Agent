@@ -21,6 +21,7 @@ dependencies = [
     "bm25s>=0.3.8",
     "jieba>=0.42.1",
     "python-multipart>=0.0.27",
+    "crawl4ai>=0.8.0",
 ]
 
 [dependency-groups]

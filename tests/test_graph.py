@@ -94,10 +94,10 @@ def events_capturer():
 async def test_full_pipeline_single_iteration(mock_deps, events_capturer):
     from src.backend.graph import build_and_run_graph
 
-    state = {"user_query": "What is AI safety?"}
+    state = {"user_query": "Analyze AI safety implications"}
     result = await build_and_run_graph(state, events_capturer)
 
-    # All nodes should have been called
+    # All nodes should have been called (standard route)
     mock_deps["plan"].assert_called_once()
     mock_deps["split"].assert_called_once()
     mock_deps["subs"].assert_called_once()
@@ -137,7 +137,7 @@ async def test_reflection_with_gaps_loops_back(mock_deps, events_capturer):
         }),
     ]
 
-    state = {"user_query": "What is AI safety?", "max_iterations": 3}
+    state = {"user_query": "Analyze AI safety research and implications", "max_iterations": 3}
     result = await build_and_run_graph(state, events_capturer)
 
     # Should have called subagents twice (initial + gap-fill)
@@ -162,7 +162,7 @@ async def test_reflection_max_iterations_reached(mock_deps, events_capturer):
                               "source_types": "academic", "boundaries": "", "estimated_searches": 5}}],
     })
 
-    state = {"user_query": "test", "max_iterations": 1}
+    state = {"user_query": "Analyze test implications in depth", "max_iterations": 1}
     result = await build_and_run_graph(state, events_capturer)
     assert result["iteration_count"] <= 1
 
@@ -191,7 +191,7 @@ async def test_reflection_failure_fallback(mock_deps, events_capturer):
 
     mock_deps["chat"].side_effect = RuntimeError("reflection failure")
 
-    state = {"user_query": "test query"}
+    state = {"user_query": "Analyze test query implications in depth"}
     result = await build_and_run_graph(state, events_capturer)
 
     # Should complete even if reflection fails
@@ -204,7 +204,7 @@ async def test_reflection_failure_fallback(mock_deps, events_capturer):
 async def test_events_emitted_for_all_phases(mock_deps, events_capturer):
     from src.backend.graph import build_and_run_graph
 
-    state = {"user_query": "test"}
+    state = {"user_query": "Analyze test implications in depth"}
     await build_and_run_graph(state, events_capturer)
 
     event_types = {e["type"] for e in events_capturer.events}
@@ -220,10 +220,10 @@ async def test_events_emitted_for_all_phases(mock_deps, events_capturer):
 def test_progress_function():
     from src.backend.graph import _progress
 
-    # TOTAL_WEIGHT = 2+8+5+60+5+12+8 = 100
+    # TOTAL_WEIGHT = 2+8+5+58+5+12+8 = 98
     assert _progress(0, 2) == 2
     assert _progress(2, 8) == 10
-    assert _progress(99, 10) == 99
+    assert _progress(97, 10) == 99
 
 
 # ── Run ID generation ──────────────────────────────────────────
@@ -232,7 +232,7 @@ def test_progress_function():
 async def test_run_id_generated_if_not_provided(mock_deps, events_capturer):
     from src.backend.graph import build_and_run_graph
 
-    state = {"user_query": "test"}
+    state = {"user_query": "Analyze test implications in depth"}
     result = await build_and_run_graph(state, events_capturer)
     assert len(result["run_id"]) > 0
     assert result["run_id"] != ""
@@ -244,7 +244,7 @@ async def test_run_id_generated_if_not_provided(mock_deps, events_capturer):
 async def test_checkpoints_persisted_for_all_phases(mock_deps, events_capturer):
     from src.backend.graph import build_and_run_graph
 
-    state = {"user_query": "test"}
+    state = {"user_query": "Analyze test implications in depth"}
     await build_and_run_graph(state, events_capturer)
 
     # Verify persist_checkpoint was called for each phase
@@ -269,7 +269,7 @@ async def test_synthesis_retry_on_truncation(mock_deps, events_capturer):
         "# Complete Report\n\nFull content with proper ending.",  # retry succeeds
     ]
 
-    state = {"user_query": "test", "context_compress_retries": 1}
+    state = {"user_query": "Analyze test implications in depth", "context_compress_retries": 1}
     result = await build_and_run_graph(state, events_capturer)
 
     assert mock_deps["synth"].call_count == 2
@@ -282,7 +282,7 @@ async def test_synthesis_no_retry_when_complete(mock_deps, events_capturer):
 
     mock_deps["synth"].return_value = "# Complete\n\nFull report content with sentences.\n\n" + "x" * 500 + "."
 
-    state = {"user_query": "test", "context_compress_retries": 1}
+    state = {"user_query": "Analyze test implications in depth", "context_compress_retries": 1}
     result = await build_and_run_graph(state, events_capturer)
 
     assert mock_deps["synth"].call_count == 1
@@ -304,7 +304,7 @@ async def test_reflection_low_quality_sets_failure_summary(mock_deps, events_cap
                               "source_types": "academic", "boundaries": "", "estimated_searches": 5}}],
     })
 
-    state = {"user_query": "test", "max_iterations": 1, "context_compress_retries": 1}
+    state = {"user_query": "Analyze test implications in depth", "max_iterations": 1, "context_compress_retries": 1}
     result = await build_and_run_graph(state, events_capturer)
 
     # Should still complete

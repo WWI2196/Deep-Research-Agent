@@ -862,6 +862,40 @@ body {
 
 .log-error { color: var(--red); }
 
+/* ReAct chain visualisation in log viewer */
+.react-chain-item {
+  margin-left: 16px;
+  border-left: 2px solid rgba(139, 92, 246, 0.3);
+  position: relative;
+}
+.react-chain-item::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: 14px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(139, 92, 246, 0.4);
+}
+.react-icon {
+  font-size: 11px;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  margin-right: 2px;
+}
+.react-start { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+.react-step { background: rgba(139, 92, 246, 0.15); color: #c4b5fd; }
+.react-act { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
+.react-observe { background: rgba(168, 162, 158, 0.15); color: #a8a29e; }
+.react-guard { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
+.react-error { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.react-complete { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+
 /* Log modal */
 .log-modal {
   position: fixed;

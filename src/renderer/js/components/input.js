@@ -126,11 +126,13 @@ function initInputPage() {
     }
   });
 
-  // Collection toggle
+  // Collection toggle — default expanded
   const toggleBtn = document.getElementById('btn-toggle-collections');
   const panel = document.getElementById('collection-panel');
   const chevron = document.getElementById('collection-chevron');
   if (toggleBtn && panel) {
+    panel.style.display = 'block';
+    if (chevron) chevron.textContent = '▾';
     on(toggleBtn, 'click', () => {
       const open = panel.style.display !== 'none';
       panel.style.display = open ? 'none' : 'block';
@@ -157,15 +159,18 @@ async function loadCollectionsForInput() {
       return;
     }
 
-    container.innerHTML = collections.map(c => {
-      const checked = _selectedCollections.includes(c.id) ? 'checked' : '';
-      return `
-        <label class="collection-checkbox">
-          <input type="checkbox" value="${c.id}" ${checked}>
-          <span>${escapeHtml(c.name)}</span>
-        </label>
-      `;
-    }).join('');
+    container.innerHTML = `
+      <div style="color:var(--text-tertiary);font-size:12px;margin-bottom:8px">Select libraries to include in research</div>
+      ${collections.map(c => {
+        const checked = _selectedCollections.includes(c.id) ? 'checked' : '';
+        return `
+          <label class="collection-checkbox">
+            <input type="checkbox" value="${c.id}" ${checked}>
+            <span>${escapeHtml(c.name)}</span>
+          </label>
+        `;
+      }).join('')}
+    `;
 
     container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
       cb.addEventListener('change', () => {

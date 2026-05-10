@@ -1,21 +1,18 @@
-"""Subagent orchestration: search, evaluate, extract, report."""
+"""Subagent orchestration: ReAct Agent-driven search, evaluate, extract, report."""
 
 import asyncio
 import json
 import logging
 from typing import Any
 
-from . import search as search_mod
 from .config import get_config
 from .helpers import (
     enforce_source_diversity,
     enforce_source_type_quota,
-    estimate_tokens,
     extract_json,
     generate_broader_queries,
     normalize_search_item,
     query_similarity,
-    smart_truncate,
 )
 from .llm import chat
 from .prompts import SOURCE_EVALUATE, SUBAGENT_REPORT
@@ -46,8 +43,9 @@ def generate_search_queries(subtask: dict[str, Any]) -> list[str]:
     keywords = subtask.get("keywords", [])
     source_types = subtask.get("source_types", "")
 
+    title = subtask.get("title", "")
     if not keywords:
-        return [subtask["title"]]
+        return [f"{title} 2025", f"{title} 2026", title]
 
     if isinstance(source_types, str):
         source_types_list = [s.strip().lower() for s in source_types.split(",")]
@@ -86,6 +84,13 @@ def generate_search_queries(subtask: dict[str, Any]) -> list[str]:
         )
         if not is_dup:
             fuzzy_deduped.append(q)
+
+    # Fallback for very few keywords: prepend year-boosted title queries
+    if len(keywords) < 2 and title:
+        year_queries = [f"{title} 2025", f"{title} 2026"]
+        if title not in fuzzy_deduped:
+            year_queries.append(title)
+        fuzzy_deduped = year_queries + fuzzy_deduped
 
     logger.info("Generated %d search queries (fuzzy dedup from %d) for subtask %s",
                 len(fuzzy_deduped[:10]), len(deduped), subtask.get("id", "?"))
@@ -131,7 +136,8 @@ async def batch_evaluate_sources(
             evals = {item["id"]: item for item in result.get("evaluations", [])}
             for idx, src in enumerate(batch):
                 ev = evals.get(idx)
-                src["quality_score"] = float(ev["score"]) if ev else 0.3
+                raw = float(ev.get("normalized_score") or ev.get("score", 0.3)) if ev else 0.3
+                src["quality_score"] = max(0.0, min(1.0, raw))
                 src["full_text"] = bool(ev.get("full_text", False)) if ev else False
                 src["reasoning"] = ev.get("reason", "") if ev else ""
                 scored.append(src)
@@ -191,7 +197,7 @@ async def _search_document_collections(
         "query": query,
         "top_k": 12,
     }, level="debug")
-    results = await store.query(collection_ids, query, top_k=12)
+    results = await store.query(collection_ids, query, top_k=6)
     if not results:
         await trace("subagents", "rag_results", "No document results", {"count": 0}, level="debug")
         return None
@@ -224,285 +230,200 @@ async def run_subagent(
     tool_budget: int,
     query_cache: dict[str, list[dict[str, Any]]] | None = None,
     document_collections: list[str] | None = None,
+    gap_instruction: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    sid = subtask["id"]
-    stitle = subtask["title"]
+    """ReAct Agent-driven subagent implementation."""
+    from .react_agent import run_react_agent
+    from .tools import build_research_tools
+    from .prompts import SUBAGENT_REACT_SYSTEM
+
+    sid = subtask.get("id") or f"fallback-{hash(subtask.get('title', '')) % 10000}"
+    stitle = subtask.get("title", "Untitled")
     if query_cache is None:
         query_cache = {}
 
-    # 1 — generate queries (rules-based, no LLM call)
-    queries = generate_search_queries(subtask)
+    # Build tools bound to shared query_cache
+    tools = build_research_tools(query_cache=query_cache)
 
-    # 2 — parallel search with query cache + empty-result rollback
-    search_queries = queries[: max(1, min(10, tool_budget))]
+    # Override submit_report tool to force-inject correct subtask ID/title.
+    # The LLM sometimes omits the id when constructing the subtask dict itself,
+    # so we remove it from params_schema and inject it server-side.
+    for t in tools:
+        if t.name == "submit_report":
+            from .tools import submit_report_tool
 
-    async def _search_one_cached(q: str) -> dict[str, Any] | None:
-        if q in query_cache:
-            logger.info("Query cache HIT for '%s' (subtask %s)", q[:60], sid)
-            return query_cache[q]
-        try:
-            result = await asyncio.to_thread(search_mod.search, q, limit=8)
-            query_cache[q] = result if result else {"data": []}
+            async def _bound_submit_report(
+                evidence, user_query,
+                _sid=sid, _stitle=stitle, _subtask=subtask, _rp=research_plan,
+                **_unused,
+            ):
+                return await submit_report_tool(
+                    evidence=evidence,
+                    subtask={
+                        "id": _sid,
+                        "title": _stitle,
+                        "description": _subtask.get("description", ""),
+                        "objective": _subtask.get("objective", ""),
+                        "output_format": _subtask.get("output_format", "markdown"),
+                        "source_types": _subtask.get("source_types", ""),
+                        "boundaries": _subtask.get("boundaries", ""),
+                    },
+                    user_query=user_query,
+                    research_plan=_rp,
+                )
 
-            if result is not None and not result.get("data"):
-                broader = generate_broader_queries(q)
-                for bq in broader:
-                    if bq not in query_cache:
-                        bq_result = await asyncio.to_thread(
-                            search_mod.search, bq, limit=8
-                        )
-                        query_cache[bq] = bq_result if bq_result else {"data": []}
-                        if bq_result and bq_result.get("data"):
-                            logger.info(
-                                "Empty-result rollback: broader '%s' -> %d results",
-                                bq, len(bq_result["data"]),
-                            )
-                            return bq_result
-            return result
-        except Exception:
-            return None
+            t.params_schema = {"evidence": "list[dict]", "user_query": "str"}
+            t.description = (
+                "Submit the final report for this subtask. Provide all collected evidence. "
+                "This should be called ONLY when you have gathered sufficient evidence and are ready to finalize."
+            )
+            t.fn = _bound_submit_report
+            break
 
-    tasks: list[Any] = [_search_one_cached(q) for q in search_queries]
-    if document_collections:
-        tasks.append(_search_document_collections(document_collections, subtask, user_query))
-    search_results = await asyncio.gather(*tasks)
-
-    raw_candidates: list[dict[str, Any]] = []
-    for sr in search_results:
-        if not sr or not sr.get("data"):
-            continue
-        for item in sr["data"]:
-            normalized = normalize_search_item(item, "search")
-            if normalized:
-                raw_candidates.append(normalized)
-
-    # 3 — evaluate + select full-text in one LLM call
-    scored = await batch_evaluate_sources(raw_candidates, subtask.get("objective", user_query))
-    scored.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-
-    # Document sources are highly trusted and always treated as full-text
-    for s in scored:
-        if s.get("source") == "document":
-            s["quality_score"] = max(s.get("quality_score", 0), 0.85)
-            s["full_text"] = True
-
-    # 3b — adaptive query refinement
-    refined_queries = await _refine_queries_if_needed(subtask, scored, queries)
-    if refined_queries:
-        refined_tasks = [_search_one_cached(q) for q in refined_queries]
-        refined_results = await asyncio.gather(*refined_tasks)
-        for sr in refined_results:
-            if not sr or not sr.get("data"):
-                continue
-            for item in sr["data"]:
-                normalized = normalize_search_item(item, "refined-search")
-                if normalized:
-                    raw_candidates.append(normalized)
-        scored = await batch_evaluate_sources(raw_candidates, subtask.get("objective", user_query))
-        scored.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-
-    cfg = get_config()
-
-    # 3c — enforce source diversity + source-type quotas
-    scored = enforce_source_diversity(scored, max_per_domain=3)
-    scored = enforce_source_type_quota(
-        scored,
-        quotas=getattr(cfg, "source_type_quotas", None),
-        min_per_type=getattr(cfg, "min_source_per_type", None),
+    # Build system prompt
+    system_prompt = SUBAGENT_REACT_SYSTEM.format(
+        subtask_id=sid,
+        subtask_title=stitle,
+        subtask_objective=subtask.get("objective", ""),
+        subtask_description=subtask.get("description", ""),
+        subtask_source_types=subtask.get("source_types", ""),
+        subtask_boundaries=subtask.get("boundaries", ""),
     )
 
-    # Deduplicate
-    seen_urls: set[str] = set()
-    filtered: list[dict[str, Any]] = []
-    for s in scored:
-        u = s.get("url")
-        if u and u not in seen_urls:
-            seen_urls.add(u)
-            filtered.append(s)
+    # Build user prompt with gap instruction if present
+    user_prompt_parts = [
+        f"Global query: {user_query}",
+        f"Research plan: {research_plan[:2000]}",
+        f"Subtask: {stitle} ({sid})",
+        f"Objective: {subtask.get('objective', '')}",
+    ]
+    if document_collections:
+        user_prompt_parts.append(
+            f"Document collections available: {document_collections}. "
+            "Use document_hybrid_search to search these collections."
+        )
+    if gap_instruction:
+        user_prompt_parts.append(
+            f"\n[REFLECTION GAP INSTRUCTION]\n"
+            f"Type: {gap_instruction.get('gap_type', 'missing_evidence')}\n"
+            f"Description: {gap_instruction.get('description', '')}\n"
+            f"Suggested queries: {gap_instruction.get('suggested_queries', [])}\n"
+            "Please address this gap in your investigation."
+        )
+    user_prompt = "\n\n".join(user_prompt_parts)
 
-    if not filtered:
-        for item in raw_candidates:
-            raw_url = item.get("url")
-            if raw_url and raw_url not in seen_urls:
-                seen_urls.add(raw_url)
-                filtered.append({
-                    "url": raw_url,
-                    "title": item.get("title", ""),
-                    "description": item.get("description", ""),
-                    "quality_score": 0.2,
-                    "source": item.get("source", "search"),
-                })
-
-    # Determine which URLs to fetch full-text (from LLM evaluation)
-    full_text_urls: set[str] = {
-        s["url"] for s in filtered
-        if s.get("full_text") and s.get("url")
-    }
-    # Ensure at least top 5 by score if LLM didn't select enough
-    if len(full_text_urls) < 3:
-        for s in filtered[:5]:
-            if s.get("url"):
-                full_text_urls.add(s["url"])
-
-    top_urls = [s.get("url") for s in filtered if s.get("url")][: min(12, tool_budget)]
-    if not top_urls:
-        filtered = [{"url": rc.get("url"), "title": rc.get("title", ""),
-                     "description": rc.get("description", ""), "quality_score": 0.2}
-                    for rc in raw_candidates if rc.get("url") and rc.get("url") not in seen_urls]
-        seen_urls.update(s.get("url") for s in filtered)
-        top_urls = [s.get("url") for s in filtered if s.get("url")][: min(12, tool_budget)]
-
-    # 4 — extract full text (markdown) via trafilatura for full_text_urls
-    async def _extract_one(url: str) -> tuple[str, str | None]:
-        try:
-            if url.startswith("file://"):
-                return url, None
-            if url in full_text_urls:
-                text = await asyncio.to_thread(search_mod.extract, url)
-                return url, text
-            return url, None
-        except Exception:
-            return url, None
-
-    extract_tasks = [_extract_one(url) for url in top_urls[:12]]
-    extract_results = await asyncio.gather(*extract_tasks)
-    extracted_map = {url: text for url, text in extract_results if text}
-
-    # 5 — build evidence
-    evidence: list[dict[str, Any]] = []
-    for s in filtered:
-        url = s.get("url")
-        if not url or url not in top_urls:
-            continue
-        if s.get("source") == "document":
-            text = s.get("description", "")
-            if text:
-                evidence.append({
-                    "url": url, "data": f"[DOCUMENT] {text}",
-                    "score": s.get("quality_score", 0.85),
-                })
-        elif url in extracted_map:
-            evidence.append({
-                "url": url, "data": f"[FULL-TEXT] {extracted_map[url]}",
-                "score": s.get("quality_score", 0.2),
-            })
-        else:
-            snippet = s.get("description") or s.get("title", "")
-            if snippet:
-                evidence.append({
-                    "url": url, "data": f"[SNIPPET] {snippet}",
-                    "score": s.get("quality_score", 0.2),
-                })
-
-    # Compress evidence by token budget instead of fixed count
-    keep_n = getattr(cfg, "keep_tool_results", 5)
-    max_tokens = getattr(cfg, "max_evidence_tokens", 8000)
-    max_per_item = getattr(cfg, "max_evidence_per_item", 3000)
-    evidence_before = len(evidence)
-
-    if keep_n > 0:
-        evidence.sort(key=lambda x: x.get("score", 0.2), reverse=True)
-        # Phase 1 — guarantee minimum count
-        selected = evidence[:keep_n]
-        used_tokens = sum(estimate_tokens(e["data"]) for e in selected)
-        remaining_budget = max_tokens - used_tokens
-
-        # Phase 2 — fill remaining token budget with additional evidence
-        for e in evidence[keep_n:]:
-            tokens = estimate_tokens(e["data"])
-            if tokens <= remaining_budget:
-                selected.append(e)
-                remaining_budget -= tokens
-            elif remaining_budget > 200:
-                # Try to fit a truncated version
-                allowed_chars = min(max_per_item, remaining_budget * 3)
-                truncated = smart_truncate(e["data"], allowed_chars)
-                if len(truncated) > allowed_chars * 0.5:
-                    e["data"] = truncated
-                    selected.append(e)
-                break
-            else:
-                break
-        evidence = selected
-
-        if evidence_before > len(evidence):
-            logger.info("Compressed evidence from %d to %d items (budget %d tokens, used ~%d)",
-                        evidence_before, len(evidence), max_tokens,
-                        max_tokens - remaining_budget)
-
-    await trace("subagents", "evidence_built", f"Built {len(evidence)} evidence items", {
+    await trace("subagents", "react_start", f"Starting ReAct subagent {sid}", {
         "subtask_id": sid,
-        "evidence_count": len(evidence),
-        "compressed_from": evidence_before if evidence_before > len(evidence) else None,
-        "keep_tool_results": keep_n,
-        "max_evidence_tokens": max_tokens,
-        "sources": [
-            {"url": e["url"], "score": e.get("score"), "type": e["data"].split("]")[0].lstrip("[")}
-            for e in evidence[:10]
-        ],
+        "tool_budget": tool_budget,
+        "has_gap_instruction": gap_instruction is not None,
     }, level="debug")
 
-    # Truncate each evidence item with smart boundaries
-    for e in evidence:
-        item_limit = max_per_item
-        if e["data"].startswith("[DOCUMENT]"):
-            item_limit = min(5000, max_per_item + 2000)
-        if len(e["data"]) > item_limit:
-            e["data"] = smart_truncate(e["data"], item_limit)
+    result = await run_react_agent(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        tools=tools,
+        chat_fn=chat,
+        max_steps=min(tool_budget, 15),
+        temperature=0.3,
+    )
 
-    evidence_text = "\n\n".join(f"[From {e['url']}]: {e['data']}" for e in evidence)
+    report = result.get("final_answer", "")
+    tool_calls = result.get("tool_calls", [])
 
-    def _retry_hint(attempt: int, prev_report: str) -> str:
-        if attempt == 0:
-            return ""
-        hints = []
-        if len(prev_report) < 200:
-            hints.append("YOUR PREVIOUS RESPONSE WAS EMPTY OR TOO SHORT.")
-        if "[src:" not in prev_report:
-            hints.append("YOUR PREVIOUS RESPONSE HAD NO [src: url] CITATIONS. "
-                         "Every factual claim MUST be followed by [src: <url>] immediately.")
-        if not hints:
-            return ""
-        return "\n\n" + " ".join(hints) + " Write a complete 800-1500 word report with proper citations."
+    # Compress overly long reports by keeping high-importance paragraphs
+    if len(report) > 8000:
+        paragraphs = [p for p in report.split("\n\n") if p.strip()]
+        if len(paragraphs) > 3:
+            scored: list[tuple[int, str, int]] = []
+            for i, para in enumerate(paragraphs):
+                score = 0
+                if "[src:" in para:
+                    score += 3
+                if re.search(r"\b\d{4}\b|\b\d+\.\d+|```|\bdef\s+\w+|\bclass\s+\w+", para):
+                    score += 2
+                if i < 2:
+                    score += 1
+                scored.append((i, para, score))
+            scored.sort(key=lambda x: x[2], reverse=True)
+            # Keep top paragraphs up to ~6000 chars
+            kept: list[tuple[int, str]] = []
+            current_len = 0
+            for idx, para, _ in scored:
+                para_len = len(para) + 2
+                if current_len + para_len <= 6000:
+                    kept.append((idx, para))
+                    current_len += para_len
+            kept.sort(key=lambda x: x[0])
+            report = "\n\n".join(p for _, p in kept)
 
-    # 6 — write report (retry once if too short or missing citations)
-    report = ""
-    for attempt in range(2):
-        report = await chat(
-            role="subagent",
-            messages=[{
-                "role": "system",
-                "content": SUBAGENT_REPORT.format(
-                    user_query=user_query,
-                    research_plan=research_plan[:3000],
-                    subtask_id=sid,
-                    subtask_title=stitle,
-                    subtask_description=subtask.get("description", ""),
-                    subtask_objective=subtask.get("objective", ""),
-                    subtask_output_format=subtask.get("output_format", "markdown"),
-                    subtask_tool_guidance=subtask.get("tool_guidance", ""),
-                    subtask_source_types=subtask.get("source_types", ""),
-                    subtask_boundaries=subtask.get("boundaries", ""),
-                ),
-            }, {
-                "role": "user",
-                "content": f"Evidence:\n{evidence_text}" + _retry_hint(attempt, report),
-            }],
-        )
-        if len(report) >= 200 and "[src:" in report:
-            break
+    # Fallback for empty report
     if len(report) < 200:
-        report = f"# {stitle}\n\n## Summary\n\nResearch on this subtask was not completed. Evidence collected: {len(evidence)} sources.\n\n## Sources\n\n" + "\n".join(
-            f"- [{e['url']}]({e['url']})" for e in evidence[:10]
+        report = (
+            f"# {stitle}\n\n## Summary\n\n"
+            f"Research on this subtask was not completed. Tool calls: {len(tool_calls)}.\n\n## Sources\n\n"
+            + "\n".join(
+                f"- {tc['input'].get('query', tc['input'].get('urls', ['unknown'])[0])}"
+                for tc in tool_calls[:10]
+                if tc.get("input")
+            )
         )
+
+    # Extract sources from tool calls for backward compatibility
+    sources = _extract_sources_from_tool_calls(tool_calls)
+
+    await trace("subagents", "react_end", f"ReAct subagent {sid} complete", {
+        "subtask_id": sid,
+        "report_length": len(report),
+        "steps_taken": result.get("steps_taken", 0),
+        "sources_count": len(sources),
+    }, level="debug")
 
     return {
         "subtask_id": sid,
         "subtask_title": stitle,
         "report": report,
-        "sources": filtered[:20],
-        "evidence_count": len(evidence),
+        "sources": sources,
+        "evidence_count": len([tc for tc in tool_calls if tc.get("tool") in ("searxng_search", "document_hybrid_search")]),
+        "tool_calls": tool_calls,
     }
+
+
+def _extract_sources_from_tool_calls(tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract unique sources from search tool calls for backward compatibility."""
+    sources: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for tc in tool_calls:
+        if tc.get("tool") not in ("searxng_search", "document_hybrid_search"):
+            continue
+        result = tc.get("result", {})
+        if not result.get("success"):
+            continue
+        data = result.get("result", {})
+        for item in data.get("results", []):
+            url = item.get("url")
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                source_type = item.get("source", "search")
+                raw_score = item.get("quality_score")
+                if raw_score is None:
+                    raw_score = item.get("score")
+                try:
+                    raw_score = float(raw_score) if raw_score is not None else None
+                except (ValueError, TypeError):
+                    raw_score = None
+                if source_type == "document":
+                    quality_score = max(raw_score or 0.0, 0.85)
+                else:
+                    quality_score = raw_score if raw_score is not None else 0.5
+                sources.append({
+                    "url": url,
+                    "title": item.get("title", ""),
+                    "description": item.get("description", ""),
+                    "quality_score": quality_score,
+                    "source": source_type,
+                    "doc_id": item.get("doc_id", ""),
+                })
+    return sources
 
 
 async def run_subagents_parallel(
@@ -512,16 +433,25 @@ async def run_subagents_parallel(
     tool_calls_per_subagent: int,
     query_cache: dict[str, list[dict[str, Any]]] | None = None,
     document_collections: list[str] | None = None,
+    gap_instructions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if query_cache is None:
         query_cache = {}
+    if gap_instructions is None:
+        gap_instructions = []
 
-    tasks = [
-        run_subagent(user_query, research_plan, st, tool_calls_per_subagent,
-                     query_cache=query_cache,
-                     document_collections=document_collections)
-        for st in subtasks
-    ]
+    tasks = []
+    for st in subtasks:
+        gap = next(
+            (g for g in gap_instructions if g.get("target_subtask_id") == st["id"]),
+            None,
+        )
+        tasks.append(run_subagent(
+            user_query, research_plan, st, tool_calls_per_subagent,
+            query_cache=query_cache,
+            document_collections=document_collections,
+            gap_instruction=gap,
+        ))
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     reports, sources, successful = [], [], []

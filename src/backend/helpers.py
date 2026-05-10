@@ -44,7 +44,18 @@ def normalize_search_item(item: dict[str, Any], source_label: str) -> dict[str, 
     description = pick_first_nonempty(
         item, ["description", "snippet", "summary", "content", "markdown", "text"]
     )
-    return {"title": title, "url": url, "description": description, "source": item.get("source") or source_label}
+    score = item.get("score")
+    try:
+        score = float(score) if score is not None else None
+    except (ValueError, TypeError):
+        score = None
+    return {
+        "title": title,
+        "url": url,
+        "description": description,
+        "source": item.get("source") or source_label,
+        "score": score,
+    }
 
 
 def has_clean_ending(text: str) -> bool:
@@ -219,3 +230,102 @@ def generate_broader_queries(query: str) -> list[str]:
             if len(alt) > 3:
                 alternatives.append(alt)
     return alternatives[:2]
+
+
+# ── Search result filtering ───────────────────────────────────────
+
+_BLOCKED_DOMAINS: set[str] = {
+    "merriam-webster.com",
+    "dictionary.cambridge.org",
+    "thesaurus.com",
+    "dictionary.com",
+    "urbandictionary.com",
+    "collinsdictionary.com",
+    "oxfordlearnersdictionaries.com",
+    "macmillandictionary.com",
+    "wordreference.com",
+    "translate.google.com",
+    "accounts.google.com",
+    "notebooklm.google.com",
+    "signin.aws.amazon.com",
+    "login.microsoftonline.com",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "tiktok.com",
+    "pinterest.com",
+    "youtube.com",
+    "youtu.be",
+    "soundcloud.com",
+    "spotify.com",
+    "deepl.com",
+    "tripadvisor.com",
+    "yelp.com",
+    "amazon.com",
+    "zillow.com",
+    "realtor.com",
+    "indeed.com",
+    "glassdoor.com",
+    "healthgrades.com",
+    "webmd.com",
+    "mayoclinic.org",
+}
+
+
+def _extract_query_keywords(query: str) -> set[str]:
+    """Extract meaningful keywords from a search query."""
+    stopwords = {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "must", "shall", "can", "need", "dare",
+        "ought", "used", "to", "of", "in", "for", "on", "with", "at", "by",
+        "from", "as", "into", "through", "during", "before", "after", "above",
+        "below", "between", "under", "and", "but", "or", "yet", "so", "if",
+        "because", "although", "though", "while", "where", "when", "that",
+        "which", "who", "whom", "whose", "what", "this", "these", "those",
+        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
+        "us", "them", "my", "your", "his", "its", "our", "their", "vs",
+        "2024", "2025", "2026", "latest", "new", "best", "top",
+    }
+    words = re.findall(r"[a-zA-Z一-鿿]+", query.lower())
+    return {w for w in words if len(w) > 1 and w not in stopwords}
+
+
+def is_relevant_result(item: dict[str, Any], query: str, min_match: int = 1) -> bool:
+    """Check if a search result is topically relevant to the query.
+
+    Uses keyword overlap between query and result title+description.
+    Also blocks known low-quality or irrelevant domains.
+    """
+    url = item.get("url", "")
+    try:
+        domain = urlparse(url).netloc.replace("www.", "")
+    except Exception:
+        domain = ""
+    if any(blocked in domain for blocked in _BLOCKED_DOMAINS):
+        return False
+
+    text = f"{item.get('title', '')} {item.get('description', '')}".lower()
+    keywords = _extract_query_keywords(query)
+    if not keywords:
+        return True
+    matches = sum(1 for kw in keywords if kw in text)
+    # Adaptive threshold: require more matches for queries with many keywords
+    adaptive_min = min_match
+    if len(keywords) >= 4:
+        adaptive_min = max(adaptive_min, 2)
+    if len(keywords) >= 7:
+        adaptive_min = max(adaptive_min, 3)
+    return matches >= min(adaptive_min, len(keywords))
+
+
+def filter_search_results(
+    results: list[dict[str, Any]], query: str,
+) -> list[dict[str, Any]]:
+    """Filter out irrelevant or low-quality search results."""
+    filtered: list[dict[str, Any]] = []
+    for r in results:
+        if is_relevant_result(r, query):
+            filtered.append(r)
+    return filtered

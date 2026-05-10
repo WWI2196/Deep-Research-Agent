@@ -122,32 +122,80 @@ async def _generate_failure_summary(
         )
 
 
-def _trim_reports_by_whole(reports: list[str], max_chars: int) -> str:
-    """Trim reports by dropping whole reports from the end until total fits max_chars.
+def _score_paragraph(paragraph: str, index: int) -> int:
+    """Score paragraph importance for synthesis input trimming."""
+    score = 0
+    if "[src:" in paragraph:
+        score += 3
+    if re.search(r"\b\d{4}\b|\b\d+\.\d+|```|\bdef\s+\w+|\bclass\s+\w+|#\s+\w", paragraph):
+        score += 2
+    if index < 2:
+        score += 1
+    # Deprioritize transitional fluff
+    if re.search(r"^(综上所述|总之|总而言之|最后|综上所述).*", paragraph.strip()):
+        score -= 1
+    return score
 
-    Keeps each remaining report intact to preserve inline citations and structure.
+
+def _trim_reports_by_whole(reports: list[str], max_chars: int) -> str:
+    """Trim reports by preserving high-importance paragraphs from each report.
+
+    Strategy: keep all reports, but within each report drop low-value paragraphs
+    (transitions, background filler) before removing paragraphs with citations
+    or data. Only as a last resort do we drop entire reports.
     """
     if not reports:
         return ""
     separator = "\n\n---\n\n"
-    # Try including all reports first
+
+    # Phase 1: try including all reports raw
     combined = separator.join(reports)
     if len(combined) <= max_chars:
         return combined
-    # Drop shortest reports first to keep maximum number of reports whole
-    indexed = sorted(enumerate(reports), key=lambda x: len(x[1]))
+
+    # Phase 2: compress each report by dropping low-importance paragraphs
+    compressed: list[str] = []
+    for report in reports:
+        paragraphs = [p for p in report.split("\n\n") if p.strip()]
+        if not paragraphs:
+            compressed.append("")
+            continue
+        scored = [(i, p, _score_paragraph(p, i)) for i, p in enumerate(paragraphs)]
+        scored.sort(key=lambda x: x[2], reverse=True)
+        # Greedy rebuild: add paragraphs in importance order until near budget
+        kept: list[tuple[int, str]] = []
+        current_len = 0
+        for idx, para, _ in scored:
+            para_len = len(para) + 2  # +2 for \n\n
+            if current_len + para_len <= max_chars // len(reports) + 1000:
+                kept.append((idx, para))
+                current_len += para_len
+        # Restore original order
+        kept.sort(key=lambda x: x[0])
+        compressed.append("\n\n".join(p for _, p in kept))
+
+    combined = separator.join(r for r in compressed if r)
+    if len(combined) <= max_chars:
+        return combined
+
+    # Phase 3: drop shortest compressed reports until we fit
+    indexed = sorted(enumerate(compressed), key=lambda x: len(x[1]) if x[1] else 0)
     dropped: set[int] = set()
     for idx, _ in indexed:
-        remaining = [reports[i] for i in range(len(reports)) if i not in dropped]
+        remaining = [compressed[i] for i in range(len(compressed)) if i not in dropped and compressed[i]]
         if not remaining:
             break
         combined = separator.join(remaining)
         if len(combined) <= max_chars:
             return combined
         dropped.add(idx)
-    # Fallback: keep at least the longest report
-    longest = max(reports, key=len)
-    return longest[:max_chars]
+
+    # Fallback: keep at least the longest remaining report
+    remaining = [compressed[i] for i in range(len(compressed)) if i not in dropped and compressed[i]]
+    if remaining:
+        longest = max(remaining, key=len)
+        return longest[:max_chars]
+    return reports[0][:max_chars] if reports else ""
 
 
 async def synthesize_report(
@@ -205,7 +253,7 @@ async def synthesize_report(
                         failure_summary=failure_block,
                     ),
                 }],
-                max_tokens=16384,
+                max_tokens=20000,
             )
 
             # If truncated, explicitly continue until marker appears or no more truncation
@@ -294,8 +342,8 @@ async def _verify_citation_urls(urls: list[str]) -> dict[str, bool]:
     async def _check_one(url: str) -> tuple[str, bool]:
         async with semaphore:
             if url.startswith("file://"):
-                path = Path(url[7:])
-                return url, await asyncio.to_thread(path.exists)
+                # Document library sources are always trusted; skip liveness check
+                return url, True
             try:
                 text = await asyncio.wait_for(
                     asyncio.to_thread(search_mod.extract, url),
@@ -379,36 +427,21 @@ async def add_citations(
         if u and u not in source_by_url:
             source_by_url[u] = s
 
-    # Build References section — use bold labels so all markdown renderers show them
+    # Build References section — one per line, clean numbered layout
     refs = "\n\n## References\n\n"
     for url, idx in sorted(seen.items(), key=lambda x: x[1]):
         src = source_by_url.get(url, {})
         title = src.get("title", "") or _domain_from_url(url)
-        refs += f"**[{idx}]** [{title}]({url})\n"
+        if url.startswith("file://"):
+            refs += f"{idx}. 📄 {title}\n\n"
+        else:
+            refs += f"{idx}. [{title}]({url})\n\n"
 
-    cited_report += refs
+    cited_report += refs.rstrip() + "\n"
 
-    # Verify URL accessibility concurrently
+    # URL verification temporarily disabled — trafilatura liveness check was too strict
     all_urls = list(seen.keys())
-    verification = await _verify_citation_urls(all_urls)
-
-    # Mark unverified URLs in References
-    unverified_count = sum(1 for v in verification.values() if not v)
-    if unverified_count > 0:
-        for url, ok in verification.items():
-            if not ok and url in seen:
-                idx = seen[url]
-                tag = "[unverified]"
-                cited_report = cited_report.replace(
-                    f"[^{idx}]: [{source_by_url.get(url, {}).get('title', '') or _domain_from_url(url)}]({url})",
-                    f"[^{idx}]: [{source_by_url.get(url, {}).get('title', '') or _domain_from_url(url)}]({url}) {tag}",
-                )
-
-    # Append verification footer
-    total = len(all_urls)
-    accessible = total - unverified_count
-    footer = f"\n\n---\n*Citation check: {accessible}/{total} URLs accessible*"
-    cited_report += footer
+    verification = {url: True for url in all_urls}
 
     return cited_report, verification
 

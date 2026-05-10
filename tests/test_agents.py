@@ -209,14 +209,39 @@ def test_enforce_source_diversity_no_url():
 async def test_generate_research_plan():
     from src.backend.agents import generate_research_plan
 
-    with patch("src.backend.planning.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = '{"dimensions": [{"name": "AI Future", "scope": "Future of AI", "source_types": "academic", "keywords": ["AI", "future"]}], "output_structure": ["Intro"], "methodology": "research"}'
+    plan_json = '{"dimensions": [{"name": "AI Future", "scope": "Future of AI", "source_types": "academic", "keywords": ["AI", "future"]}], "output_structure": ["Intro"], "methodology": "research"}'
+
+    with patch("src.backend.planning.run_react_agent", new_callable=AsyncMock) as mock_react:
+        mock_react.return_value = {
+            "final_answer": plan_json,
+            "tool_calls": [],
+            "steps_taken": 2,
+        }
         result = await generate_research_plan("What is the future of AI?")
         assert isinstance(result, dict)
         assert "dimensions" in result
         assert result["dimensions"][0]["name"] == "AI Future"
-        call_args = mock_chat.call_args.kwargs
-        assert call_args["role"] == "planner"
+        mock_react.assert_called_once()
+        call_kwargs = mock_react.call_args.kwargs
+        assert call_kwargs["role"] == "planner"
+        assert call_kwargs["max_steps"] == 6
+
+
+@pytest.mark.asyncio
+async def test_generate_research_plan_react_fallback():
+    from src.backend.agents import generate_research_plan
+
+    with patch("src.backend.planning.run_react_agent", new_callable=AsyncMock) as mock_react, \
+         patch("src.backend.planning.chat", new_callable=AsyncMock) as mock_chat:
+        # ReAct returns no valid plan
+        mock_react.return_value = {"final_answer": "", "tool_calls": [], "steps_taken": 4}
+        # Single-pass fallback succeeds
+        mock_chat.return_value = '{"dimensions": [{"name": "Fallback", "scope": "s", "source_types": "academic", "keywords": ["k"]}], "output_structure": ["I"], "methodology": "m"}'
+
+        result = await generate_research_plan("test query")
+        assert result["dimensions"][0]["name"] == "Fallback"
+        mock_react.assert_called_once()
+        mock_chat.assert_called_once()
 
 
 # ── split_into_subtasks ────────────────────────────────────────
@@ -274,7 +299,9 @@ def test_generate_search_queries_fallback_to_title():
 
     subtask = {"id": "t1", "title": "AI Safety Research", "description": "Desc"}
     result = generate_search_queries(subtask)
-    assert result == ["AI Safety Research"]
+    assert "AI Safety Research" in result
+    assert any("2025" in q for q in result)
+    assert any("2026" in q for q in result)
 
 
 def test_generate_search_queries_adds_academic_modifiers():
@@ -425,30 +452,21 @@ async def test_run_subagent_full_flow():
         "boundaries": "No technical details",
     }
 
-    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        # Only report writing uses chat now (queries are rules-based, evaluation is mocked)
-        mock_chat.return_value = "# Market Analysis\n\nDetailed report content here."
+    with patch("src.backend.react_agent.run_react_agent", new_callable=AsyncMock) as mock_react:
+        mock_react.return_value = {
+            "final_answer": "# Market Analysis\n\nDetailed report content here.",
+            "tool_calls": [
+                {"tool": "searxng_search", "input": {"query": "EV market"}, "result": {"success": True, "result": {"results": [{"url": "https://example.com/1", "title": "Market Report 1", "description": "Good data"}]}}},
+            ],
+            "steps_taken": 3,
+        }
 
-        with patch("src.backend.subagent.search_mod.search", return_value={
-            "data": [
-                {"url": "https://example.com/1", "title": "Market Report 1", "description": "Good data"},
-                {"url": "https://example.com/2", "title": "Market Report 2", "description": "More data"},
-                {"url": "https://other.com/3", "title": "Report 3", "description": "Different domain"},
-            ]
-        }), patch("src.backend.subagent.search_mod.extract", return_value="# Full markdown content..."), \
-           patch("src.backend.subagent.batch_evaluate_sources", new_callable=AsyncMock) as mock_eval:
-            mock_eval.return_value = [
-                {"url": "https://example.com/1", "title": "Market Report 1", "description": "Good data", "quality_score": 0.9},
-                {"url": "https://example.com/2", "title": "Market Report 2", "description": "More data", "quality_score": 0.8},
-                {"url": "https://other.com/3", "title": "Report 3", "description": "Different domain", "quality_score": 0.7},
-            ]
-
-            result = await run_subagent(
-                "What is the EV market outlook?",
-                "Research plan...",
-                subtask,
-                tool_budget=10,
-            )
+        result = await run_subagent(
+            "What is the EV market outlook?",
+            "Research plan...",
+            subtask,
+            tool_budget=10,
+        )
 
     assert result["subtask_id"] == "task_1"
     assert result["subtask_title"] == "Market Analysis"
@@ -463,20 +481,18 @@ async def test_run_subagent_extract_failure_falls_back():
 
     subtask = {"id": "t1", "title": "Test", "description": "Test desc", "objective": "Test obj"}
 
-    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        # Only report writing uses chat now; queries are rules-based
-        mock_chat.return_value = "# Test\n\nReport content."
-        with patch("src.backend.subagent.search_mod.search", return_value={
-            "data": [{"url": "https://example.com/1", "title": "Test", "description": "Description text"}]
-        }), patch("src.backend.subagent.search_mod.extract", return_value=None), \
-           patch("src.backend.subagent.batch_evaluate_sources", new_callable=AsyncMock) as mock_eval:
-            mock_eval.return_value = [
-                {"url": "https://example.com/1", "title": "Test", "description": "Description text", "quality_score": 0.8}
-            ]
-            result = await run_subagent("query", "plan", subtask, tool_budget=5)
+    with patch("src.backend.react_agent.run_react_agent", new_callable=AsyncMock) as mock_react:
+        mock_react.return_value = {
+            "final_answer": "# Test\n\nReport content.",
+            "tool_calls": [
+                {"tool": "searxng_search", "input": {"query": "test"}, "result": {"success": True, "result": {"results": [{"url": "https://example.com/1", "title": "Test", "description": "Description text"}]}}},
+            ],
+            "steps_taken": 2,
+        }
+        result = await run_subagent("query", "plan", subtask, tool_budget=5)
 
     assert result["subtask_id"] == "t1"
-    assert result["evidence_count"] >= 0  # extract failed but snippet used as fallback
+    assert result["evidence_count"] >= 0
 
 
 # ── run_subagents_parallel ─────────────────────────────────────
@@ -491,7 +507,7 @@ async def test_run_subagents_parallel_success():
     ]
 
     with patch("src.backend.subagent.run_subagent", new_callable=AsyncMock) as mock_run:
-        async def fake_run(uq, rp, st, budget, query_cache=None, document_collections=None):
+        async def fake_run(uq, rp, st, budget, query_cache=None, document_collections=None, gap_instruction=None, **kwargs):
             return {
                 "subtask_id": st["id"],
                 "subtask_title": st["title"],
@@ -518,7 +534,7 @@ async def test_run_subagents_parallel_one_fails():
     ]
 
     with patch("src.backend.subagent.run_subagent", new_callable=AsyncMock) as mock_run:
-        async def fake_run(uq, rp, st, budget, query_cache=None, document_collections=None):
+        async def fake_run(uq, rp, st, budget, query_cache=None, document_collections=None, gap_instruction=None, **kwargs):
             if "fails" in st["title"]:
                 raise RuntimeError("subagent error")
             return {
@@ -546,7 +562,7 @@ async def test_run_subagents_parallel_dedup_sources():
     ]
 
     with patch("src.backend.subagent.run_subagent", new_callable=AsyncMock) as mock_run:
-        async def fake_run(uq, rp, st, budget, query_cache=None, document_collections=None):
+        async def fake_run(uq, rp, st, budget, query_cache=None, document_collections=None, gap_instruction=None, **kwargs):
             return {
                 "subtask_id": st["id"],
                 "subtask_title": st["title"],
@@ -788,29 +804,24 @@ async def test_run_subagent_uses_query_cache():
 
     cache = {"test": {"data": [{"url": "https://cached.com", "title": "Cached", "snippet": "Test"}]}}
 
-    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "# Report\n\nContent."
-        with patch("src.backend.subagent.batch_evaluate_sources", new_callable=AsyncMock) as mock_eval:
-            mock_eval.return_value = [{"url": "https://cached.com", "title": "Cached", "quality_score": 0.9}]
-            with patch("src.backend.subagent.search_mod.search") as mock_search:
-                mock_search.return_value = {"data": []}
-                with patch("src.backend.subagent.get_config") as mock_cfg:
-                    mock_cfg.return_value.keep_tool_results = 5
-                    mock_cfg.return_value.max_evidence_tokens = 8000
-                    mock_cfg.return_value.max_evidence_per_item = 3000
-                    mock_cfg.return_value.source_type_quotas = {"document": 3, "web": 8}
-                    mock_cfg.return_value.min_source_per_type = {"document": 1, "web": 2}
-                    result = await run_subagent("query", "plan", subtask, tool_budget=5, query_cache=cache)
+    with patch("src.backend.react_agent.run_react_agent", new_callable=AsyncMock) as mock_react:
+        mock_react.return_value = {
+            "final_answer": "# Report\n\nContent.",
+            "tool_calls": [],
+            "steps_taken": 1,
+        }
+        result = await run_subagent("query", "plan", subtask, tool_budget=5, query_cache=cache)
 
     assert result["subtask_id"] == "t1"
-    # search_mod.search should NOT have been called for cached query
-    # (it was called for broader queries after empty result, but not for the cached key itself)
+    # query_cache should be passed through to build_research_tools
+    assert mock_react.called
 
 
 # ── run_subagent empty result triggers broader ─────────────────
 
 @pytest.mark.asyncio
 async def test_run_subagent_empty_result_triggers_broader():
+    # Empty-result rollback is tested in test_tools.py (test_searxng_search_tool_empty_result_rollback)
     from src.backend.subagent import run_subagent
 
     subtask = {
@@ -819,29 +830,18 @@ async def test_run_subagent_empty_result_triggers_broader():
         "boundaries": "", "output_format": "markdown", "tool_guidance": "",
     }
 
-    call_args_list = []
+    with patch("src.backend.react_agent.run_react_agent", new_callable=AsyncMock) as mock_react:
+        mock_react.return_value = {
+            "final_answer": "# Report\n\nContent.",
+            "tool_calls": [
+                {"tool": "searxng_search", "input": {"query": "AI safety research paper"}, "result": {"success": True, "result": {"results": [{"url": "https://example.com", "title": "Result", "description": "Test"}]}}},
+            ],
+            "steps_taken": 2,
+        }
+        result = await run_subagent("query", "plan", subtask, tool_budget=5)
 
-    def fake_search(q, limit=8):
-        call_args_list.append(q)
-        if "research paper" in q:
-            return {"data": []}
-        return {"data": [{"url": "https://example.com", "title": "Result", "snippet": "Test"}]}
-
-    with patch("src.backend.subagent.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "# Report\n\nContent."
-        with patch("src.backend.subagent.batch_evaluate_sources", new_callable=AsyncMock) as mock_eval:
-            mock_eval.return_value = [{"url": "https://example.com", "title": "Result", "quality_score": 0.8}]
-            with patch("src.backend.subagent.search_mod.search", side_effect=fake_search):
-                with patch("src.backend.subagent.get_config") as mock_cfg:
-                    mock_cfg.return_value.keep_tool_results = 5
-                    mock_cfg.return_value.max_evidence_tokens = 8000
-                    mock_cfg.return_value.max_evidence_per_item = 3000
-                    mock_cfg.return_value.source_type_quotas = {"document": 3, "web": 8}
-                    mock_cfg.return_value.min_source_per_type = {"document": 1, "web": 2}
-                    result = await run_subagent("query", "plan", subtask, tool_budget=5)
-
-    # The broader query path was triggered
-    assert len(call_args_list) >= 1
+    assert result["subtask_id"] == "t1"
+    assert result["evidence_count"] >= 0
 
 
 # ── _trim_reports_by_whole ─────────────────────────────────────

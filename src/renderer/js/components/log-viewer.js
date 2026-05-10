@@ -30,6 +30,7 @@ function renderLogItems(items, container, runId) {
       <input id="log-filter-search" class="log-search" placeholder="Search messages..." />
       <span class="log-count">${items.length} events</span>
     </div>
+    ${items.length >= 3000 ? '<div class="log-warning">Showing up to 3000 events. Some older logs may be truncated.</div>' : ''}
     <div class="log-timeline" id="log-timeline"></div>
   `;
 
@@ -68,12 +69,18 @@ function renderLogRow(item) {
   const details = item.details || '';
   const hasDetails = details && details !== '{}' && details !== 'null';
 
+  // ReAct chain items get special visual treatment
+  const isReact = phase === 'subagents' && type.startsWith('react_');
+  const reactCls = isReact ? 'react-chain-item' : '';
+  const reactIcon = isReact ? reactTypeIcon(type) : '';
+
   return `
-    <div class="log-row ${levelCls}" data-type="${type}" data-phase="${phase}">
+    <div class="log-row ${levelCls} ${reactCls}" data-type="${type}" data-phase="${phase}">
       <div class="log-header">
         <span class="log-time">${time}</span>
         <span class="log-phase">${phase}</span>
         <span class="log-type">${type}</span>
+        ${reactIcon}
         ${role}
         ${latency}
         <span class="log-message">${escapeHtml(item.message || '')}</span>
@@ -82,6 +89,21 @@ function renderLogRow(item) {
       ${hasDetails ? `<pre class="log-details" style="display:none">${escapeHtml(formatDetails(details))}</pre>` : ''}
     </div>
   `;
+}
+
+function reactTypeIcon(type) {
+  const icons = {
+    'react_start': '<span class="react-icon react-start">▶</span>',
+    'react_step': '<span class="react-icon react-step">●</span>',
+    'react_act': '<span class="react-icon react-act">→</span>',
+    'react_observe': '<span class="react-icon react-observe">←</span>',
+    'react_guard': '<span class="react-icon react-guard">⚠</span>',
+    'react_tool_error': '<span class="react-icon react-error">✕</span>',
+    'react_error': '<span class="react-icon react-error">✕</span>',
+    'react_complete': '<span class="react-icon react-complete">✓</span>',
+    'react_max_steps': '<span class="react-icon react-error">⏹</span>',
+  };
+  return icons[type] || '';
 }
 
 function formatDetails(details) {
