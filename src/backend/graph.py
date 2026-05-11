@@ -96,6 +96,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
             document_collections=s.get("document_collections") or None,
         )
         s["research_plan"] = plan
+        s["plan_methodology"] = plan.get("methodology", "")
         dims = plan.get("dimensions", [])
         preview = json.dumps([d.get("name", "") for d in dims], ensure_ascii=False)
         await _emit({"type": "plan-generated",
@@ -316,6 +317,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
                     "content": REFLECTION.format(
                         user_query=s["user_query"],
                         research_plan=plan_dims,
+                        methodology=s.get("plan_methodology", ""),
                         past_subtasks=past,
                         subagent_reports=truncated,
                     ) + "\n\nReturn ONLY valid JSON.",

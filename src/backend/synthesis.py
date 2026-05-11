@@ -420,6 +420,15 @@ async def add_citations(
 
     cited_report = src_pattern.sub(_replace_src, report)
 
+    # ── Cleanup: strip any remaining [src: ...] markers that lack a valid URL ──
+    orphan_pattern = re.compile(r'\[src:\s*[^\]]+\]')
+    orphan_count = len(orphan_pattern.findall(cited_report))
+    if orphan_count:
+        logger.warning("Stripped %d orphaned [src: ...] markers (no valid URL)", orphan_count)
+        cited_report = orphan_pattern.sub('', cited_report)
+        # Collapse multiple spaces left behind
+        cited_report = re.sub(r' {2,}', ' ', cited_report)
+
     # Build source lookup
     source_by_url: dict[str, dict[str, Any]] = {}
     for s in sources:

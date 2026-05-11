@@ -323,8 +323,9 @@ async def run_subagent(
         user_prompt=user_prompt,
         tools=tools,
         chat_fn=chat,
-        max_steps=min(tool_budget, 15),
+        max_steps=min(tool_budget, 18),
         temperature=0.3,
+        subtask_id=sid,
     )
 
     report = result.get("final_answer", "")

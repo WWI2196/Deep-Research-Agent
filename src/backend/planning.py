@@ -12,7 +12,7 @@ from .tools import Tool, searxng_search_tool, document_hybrid_search_tool
 
 logger = logging.getLogger(__name__)
 
-PLANNER_MAX_STEPS = 6
+PLANNER_MAX_STEPS = 10
 
 
 def _build_planner_tools(
@@ -114,6 +114,7 @@ async def generate_research_plan(
             max_steps=PLANNER_MAX_STEPS,
             temperature=0.3,
             role="planner",
+            max_search_rounds=6,
         )
 
         final_answer = result.get("final_answer", "")
@@ -261,18 +262,41 @@ async def split_into_subtasks(research_plan: dict[str, Any]) -> list[dict[str, A
             logger.warning("Split retry also failed: %s. Using fallback.", e2)
             dims = research_plan.get("dimensions", [])
             if dims:
-                return [{
-                    "id": f"dim_{i}",
-                    "title": d.get("name", f"dimension_{i}"),
-                    "description": d.get("scope", ""),
-                    "objective": d.get("scope", ""),
-                    "output_format": "markdown",
-                    "dimension": d.get("name", ""),
-                    "keywords": d.get("keywords", []),
-                    "source_types": d.get("source_types", "academic, official, news"),
-                    "boundaries": "",
-                    "estimated_searches": 10,
-                } for i, d in enumerate(dims)]
+                # Fallback: derive boundaries from other dimensions' scopes
+                all_scopes = [d.get("scope", "") for d in dims]
+                subtasks = []
+                for i, d in enumerate(dims):
+                    scope = d.get("scope", "")
+                    # Estimate searches based on scope length as a proxy for breadth
+                    scope_len = len(scope)
+                    if scope_len > 200:
+                        est = 10
+                    elif scope_len > 100:
+                        est = 8
+                    else:
+                        est = 6
+                    # Build boundaries: other dimensions' names/scopes
+                    other_names = [
+                        other.get("name", f"dim_{j}")
+                        for j, other in enumerate(dims) if j != i
+                    ]
+                    boundaries = (
+                        f"Does not cover: {', '.join(other_names)}."
+                        if other_names else "Focus only on this dimension."
+                    )
+                    subtasks.append({
+                        "id": f"dim_{i}",
+                        "title": d.get("name", f"dimension_{i}"),
+                        "description": scope,
+                        "objective": scope,
+                        "output_format": "markdown",
+                        "dimension": d.get("name", ""),
+                        "keywords": d.get("keywords", []),
+                        "source_types": d.get("source_types", "academic, official, news"),
+                        "boundaries": boundaries,
+                        "estimated_searches": est,
+                    })
+                return subtasks
             return [{
                 "id": "main",
                 "title": "Main Research",
@@ -282,6 +306,6 @@ async def split_into_subtasks(research_plan: dict[str, Any]) -> list[dict[str, A
                 "dimension": "main",
                 "keywords": [],
                 "source_types": "academic, official, news",
-                "boundaries": "",
+                "boundaries": "Covers all aspects of the research topic.",
                 "estimated_searches": 10,
             }]

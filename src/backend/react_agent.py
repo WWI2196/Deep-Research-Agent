@@ -27,10 +27,11 @@ from .tracing import trace
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS_DEFAULT = 10
+MAX_STEPS_DEFAULT = 15
+MAX_SEARCH_ROUNDS_DEFAULT = 4
 MAX_RECENT_OBSERVATIONS = 6
-COMPRESSION_THRESHOLD_CHARS = 8000
-COMPRESSION_SUMMARY_MAX_LEN = 1200
+COMPRESSION_THRESHOLD_CHARS = 12000
+COMPRESSION_SUMMARY_MAX_LEN = 1500
 
 
 async def run_react_agent(
@@ -41,6 +42,8 @@ async def run_react_agent(
     max_steps: int = MAX_STEPS_DEFAULT,
     temperature: float = 0.3,
     role: str = "subagent",
+    subtask_id: str | None = None,
+    max_search_rounds: int | None = None,
 ) -> dict[str, Any]:
     """Run a ReAct agent loop.
 
@@ -52,6 +55,8 @@ async def run_react_agent(
         max_steps: Maximum number of tool-use iterations before forced termination.
         temperature: LLM sampling temperature.
         role: Role label passed to chat_fn (e.g. "subagent", "planner").
+        subtask_id: Optional subtask identifier injected into trace events for observability.
+        max_search_rounds: Override default search budget. If None, uses MAX_SEARCH_ROUNDS_DEFAULT.
 
     Returns:
         dict with:
@@ -72,15 +77,57 @@ async def run_react_agent(
     synthesize_evidence_used = False
     consecutive_fetch_fails = 0
     search_rounds_used = 0
-    max_search_rounds = 3
+    _max_search_rounds = max_search_rounds if max_search_rounds is not None else MAX_SEARCH_ROUNDS_DEFAULT
     last_search_result_count: int | None = None
     consecutive_low_results = 0
+    seen_source_urls: set[str] = set()
+    writing_phase_injected = False
+
+    async def _tr(event_type: str, message: str, details: dict[str, Any] | None = None, level: str = "debug") -> None:
+        d = details or {}
+        if subtask_id:
+            d["subtask_id"] = subtask_id
+        await trace("subagents", event_type, message, d, level=level)
 
     for step in range(max_steps):
-        await trace("subagents", "react_step", f"Step {step + 1}/{max_steps}", {
+        # Early warning: transition to writing when budget is running low
+        if step == max_steps - 5:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[SYSTEM] You have 5 steps remaining. Begin transitioning to report writing. "
+                    "Finish any ongoing search, then synthesize your findings and prepare your final report."
+                ),
+            })
+            await _tr("react_phase", "Early warning: 5 steps remaining", {"step": step + 1})
+
+        # Writing phase: forcibly disable search/extraction tools so the agent must finalize
+        if step >= max_steps - 3:
+            removed: list[str] = []
+            for name in ("searxng_search", "document_hybrid_search", "evaluate_sources", "fetch_fulltext"):
+                if name in tool_map:
+                    tool_map.pop(name)
+                    removed.append(name)
+            if removed and not writing_phase_injected:
+                available = ", ".join(tool_map.keys())
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[SYSTEM] WRITING PHASE: {len(removed)} search tools disabled. "
+                        f"Available tools now: {available}. "
+                        "You MUST complete and submit your report using existing evidence."
+                    ),
+                })
+                writing_phase_injected = True
+                await _tr("react_phase", f"Writing phase activated, removed: {removed}", {
+                    "step": step + 1,
+                    "available_tools": list(tool_map.keys()),
+                })
+
+        await _tr("react_step", f"Step {step + 1}/{max_steps}", {
             "step": step + 1,
             "max_steps": max_steps,
-        }, level="debug")
+        })
 
         # ── Think ──
         try:
@@ -91,7 +138,7 @@ async def run_react_agent(
             )
         except Exception as exc:
             logger.error("ReAct LLM call failed at step %d: %s", step + 1, exc)
-            await trace("subagents", "react_error", f"LLM call failed: {exc}", level="error")
+            await _tr("react_error", f"LLM call failed: {exc}", level="error")
             return {
                 "final_answer": "",
                 "tool_calls": tool_calls,
@@ -141,10 +188,10 @@ async def run_react_agent(
         # ── Termination? ──
         if "final_answer" in parsed:
             final = parsed["final_answer"]
-            await trace("subagents", "react_complete", f"ReAct complete after {step + 1} steps", {
+            await _tr("react_complete", f"ReAct complete after {step + 1} steps", {
                 "steps": step + 1,
                 "report_length": len(final),
-            }, level="debug")
+            })
             return {
                 "final_answer": final,
                 "tool_calls": tool_calls,
@@ -175,17 +222,17 @@ async def run_react_agent(
                     "Please use one of the available tools or provide final_answer."
                 ),
             })
-            await trace("subagents", "react_tool_error", f"Unknown tool: {action}", {
+            await _tr("react_tool_error", f"Unknown tool: {action}", {
                 "available": list(tool_map.keys()),
             }, level="warning")
             continue
 
         tool = tool_map[action]
-        await trace("subagents", "react_act", f"Executing {action}", {
+        await _tr("react_act", f"Executing {action}", {
             "step": step + 1,
             "tool": action,
             "input_preview": str(action_input)[:200],
-        }, level="debug")
+        })
 
         # Guard: synthesize_evidence may only be used once
         if action == "synthesize_evidence":
@@ -212,7 +259,7 @@ async def run_react_agent(
                     "role": "user",
                     "content": f"Observation:\n{result['result']['message']}",
                 })
-                await trace("subagents", "react_guard", "Blocked duplicate synthesize_evidence", {
+                await _tr("react_guard", "Blocked duplicate synthesize_evidence", {
                     "step": step + 1,
                 }, level="warning")
                 continue
@@ -243,21 +290,27 @@ async def run_react_agent(
                 "role": "user",
                 "content": f"Observation:\n{result['result']['message']}",
             })
-            await trace("subagents", "react_guard", "Blocked fetch_fulltext after 2 consecutive failures", {
+            await _tr("react_guard", "Blocked fetch_fulltext after 2 consecutive failures", {
                 "step": step + 1,
             }, level="warning")
             continue
 
         # Guard: limit search rounds dynamically
         if action in ("searxng_search", "document_hybrid_search"):
-            if search_rounds_used >= max_search_rounds:
+            if search_rounds_used >= _max_search_rounds:
                 result = {
                     "success": True,
                     "result": {
                         "query": action_input.get("query", ""),
                         "results": [],
                         "source": action,
-                        "message": f"Search round limit reached ({search_rounds_used}/{max_search_rounds}). Use existing evidence to write your report.",
+                        "message": (
+                            f"[SYSTEM] Search round limit reached ({search_rounds_used}/{_max_search_rounds}). "
+                            "NO MORE SEARCHES ARE ALLOWED. "
+                            "You MUST write your report NOW using only the evidence you have already gathered. "
+                            "Any further attempt to call a search tool will be REJECTED. "
+                            "Call submit_report immediately with your final markdown report."
+                        ),
                     },
                     "error": None,
                 }
@@ -275,10 +328,13 @@ async def run_react_agent(
                     "role": "user",
                     "content": f"Observation:\n{result['result']['message']}",
                 })
-                await trace("subagents", "react_guard", f"Blocked search: max {max_search_rounds} rounds reached", {
+                await _tr("react_guard", f"Blocked search: max {_max_search_rounds} rounds reached", {
                     "step": step + 1,
-                    "max_search_rounds": max_search_rounds,
+                    "max_search_rounds": _max_search_rounds,
                 }, level="warning")
+                # Remove search tools from available set so LLM cannot call them again
+                for name in ("searxng_search", "document_hybrid_search"):
+                    tool_map.pop(name, None)
                 continue
             search_rounds_used += 1
 
@@ -298,8 +354,19 @@ async def run_react_agent(
             else:
                 consecutive_low_results = 0
             if consecutive_low_results >= 1:
-                max_search_rounds = 4
+                _max_search_rounds = 5
             last_search_result_count = result_count
+
+            # Track source duplication within this subagent
+            dupes = [r for r in results_list if r.get("url") in seen_source_urls]
+            if results_list and len(dupes) >= len(results_list) * 0.5:
+                result["result"]["duplicate_note"] = (
+                    "[SYSTEM NOTE] Over 50% of these results are sources you have already seen. "
+                    "You are repeating searches. STOP searching and write your report using existing evidence."
+                )
+            for r in results_list:
+                if url := r.get("url"):
+                    seen_source_urls.add(url)
 
         # Track consecutive fetch_fulltext failures
         if action == "fetch_fulltext":
@@ -335,13 +402,34 @@ async def run_react_agent(
                         "If you are unsure what to search for, use synthesize_evidence to plan your approach."
                     ),
                 })
-                await trace("subagents", "react_guard", "Blocked premature submit_report", {
+                await _tr("react_guard", "Blocked premature submit_report", {
                     "step": step + 1,
                     "search_calls": 0,
                 }, level="warning")
                 continue
             # Fix any tool-name URLs in evidence before submitting
             action_input = _fix_submit_report_urls(action_input, tool_calls)
+
+            # Guard: reject reports that are too short
+            if result.get("success"):
+                report_text = result.get("result", {}).get("report", "")
+                if len(report_text) < 800:
+                    messages.append({
+                        "role": "assistant",
+                        "content": json.dumps({"thought": thought, "action": action, "action_input": action_input}, ensure_ascii=False),
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Observation: Report submitted but is TOO SHORT ({len(report_text)} characters). "
+                            "A complete subagent report should be 800-1500 words with detailed analysis and evidence assessment. "
+                            "Please expand your report with more depth, examples, and source citations before submitting again."
+                        ),
+                    })
+                    await _tr("react_guard", f"Rejected short report ({len(report_text)} chars)", {
+                        "step": step + 1,
+                    }, level="warning")
+                    continue
 
         # ── Observe ──
         observation = _format_observation(result)
@@ -359,30 +447,33 @@ async def run_react_agent(
             "content": f"Observation:\n{observation}",
         })
 
-        await trace("subagents", "react_observe", f"Observation from {action}", {
+        await _tr("react_observe", f"Observation from {action}", {
             "step": step + 1,
             "tool": action,
             "success": result.get("success"),
             "observation_preview": observation[:200],
-        }, level="debug")
+        })
 
         # ── Context compression ──
         if _should_compress_messages(messages):
             messages = await _compress_messages(
                 messages, chat_fn, temperature,
                 keep_recent=MAX_RECENT_OBSERVATIONS,
+                trace_fn=_tr,
             )
 
     # ── Max steps reached ──
     logger.warning("ReAct reached max_steps (%d) without final_answer", max_steps)
-    await trace("subagents", "react_max_steps", f"Max steps reached ({max_steps})", level="warning")
+    await _tr("react_max_steps", f"Max steps reached ({max_steps})", level="warning")
 
     # One final attempt to get an answer
     messages.append({
         "role": "user",
         "content": (
-            "You have reached the maximum number of steps. "
-            "Please provide your final answer now based on all the evidence you have gathered."
+            "[SYSTEM] You have reached the MAXIMUM number of steps. "
+            "This is your FINAL chance to respond. "
+            "You MUST provide your final_answer NOW. "
+            "Do NOT call any tools. Write your report based on all evidence gathered so far."
         ),
     })
     try:
@@ -416,10 +507,13 @@ def _build_tool_descriptions(tools: list) -> str:
         params = ", ".join(f"{k}: {v}" for k, v in t.params_schema.items())
         lines.append(f"- {t.name}: {t.description} (params: {params})")
     lines.append(
-        "\nRespond with JSON. Either:\n"
-        '1. {"thought": "...", "action": "tool_name", "action_input": {"arg": "value"}}\n'
-        '2. {"thought": "...", "final_answer": "your complete markdown report here"}\n'
-        "Do not wrap JSON in markdown code blocks."
+        "\nCRITICAL RULES:\n"
+        "- You have a LIMITED search budget. After search budget is exhausted, "
+        "you MUST call submit_report immediately. Do NOT attempt additional searches.\n"
+        "- Respond with JSON only. Either:\n"
+        '  1. {"thought": "...", "action": "tool_name", "action_input": {"arg": "value"}}\n'
+        '  2. {"thought": "...", "final_answer": "your complete markdown report here"}\n'
+        "- Do not wrap JSON in markdown code blocks."
     )
     return "\n".join(lines)
 
@@ -480,6 +574,8 @@ def _format_observation(result: dict[str, Any]) -> str:
         if len(results) > 8:
             lines.append(f"... and {len(results) - 8} more results")
         obs = "\n\n".join(lines)
+        if data.get("duplicate_note"):
+            obs += "\n\n" + data["duplicate_note"]
     elif isinstance(data, dict) and "extracted" in data:
         extracted = data["extracted"]
         lines = [f"Extracted full text from {len(extracted)} URLs:"]
@@ -522,6 +618,7 @@ async def _compress_messages(
     chat_fn: Callable,
     temperature: float,
     keep_recent: int = MAX_RECENT_OBSERVATIONS,
+    trace_fn: Callable | None = None,
 ) -> list[dict[str, str]]:
     """Compress older messages, keeping the most recent N observation rounds intact.
 
@@ -551,6 +648,12 @@ async def _compress_messages(
         f"{history_text}\nSummary:"
     )
 
+    if trace_fn is None:
+        async def _default_trace(event_type: str, message: str, details: dict[str, Any] | None = None, level: str = "debug") -> None:
+            await trace("subagents", event_type, message, details, level=level)
+        _trace = _default_trace
+    else:
+        _trace = trace_fn
     try:
         summary = await chat_fn(
             role="subagent",
@@ -562,13 +665,13 @@ async def _compress_messages(
             summary = summary[:COMPRESSION_SUMMARY_MAX_LEN] + "..."
     except Exception as exc:
         logger.warning("Message compression failed: %s", exc)
-        await trace("subagents", "react_compress_error", f"Compression failed: {exc}", level="warning")
+        await _trace("react_compress_error", f"Compression failed: {exc}", level="warning")
         summary = (
             "[Previous tool calls were truncated due to length. "
             f"Only the most recent {keep_recent} tool-call rounds are shown in full.]"
         )
 
-    await trace("subagents", "react_compress", "Context compressed", {
+    await _trace("react_compress", "Context compressed", {
         "original_messages": len(messages),
         "kept_recent": keep_recent,
         "compressed_messages": len(middle),

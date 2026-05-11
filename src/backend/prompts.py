@@ -87,9 +87,25 @@ Requirements:
 - Each subtask inherits that dimension's keywords, source_types, and scope.
 - Each subtask: id, title, description, objective, output_format,
   dimension, keywords, source_types, boundaries, estimated_searches.
-- estimated_searches should be 6–15 based on scope breadth.
-- Cover the full scope without overlap.
-- Do NOT include a final synthesizing task.
+
+BOUNDARIES ARE MANDATORY:
+- Every subtask MUST include a non-empty "boundaries" field.
+- "boundaries" must explicitly list what this subtask does NOT cover.
+- Example: "Does not cover: implementation details, code examples, or backtesting frameworks."
+
+AVOID OVERLAP:
+- Different subtasks' scopes MUST NOT overlap.
+- If two dimensions are thematically similar, MERGE them into a single subtask and give it a combined scope.
+- If a single dimension is very broad (covers multiple distinct topics), SPLIT it into 2–3 narrower subtasks, each with its own id and focused scope.
+
+ESTIMATED_SEARCHES GUIDELINES:
+- Narrow, deep scope (single focused topic): 6–8
+- Medium scope (2–3 related concepts): 8–10
+- Broad scope (survey/overview of a wide area): 10–12
+- Do NOT default to 10. Choose based on actual scope.
+
+Cover the full scope without overlap.
+Do NOT include a final synthesizing task.
 
 Input research plan:
 {research_plan}
@@ -99,7 +115,7 @@ Return JSON:
   "objective": "...", "output_format": "markdown",
   "dimension": "<dimension name>",
   "keywords": ["<kw1>", "<kw2>", "..."],
-  "source_types": "...", "boundaries": "...",
+  "source_types": "...", "boundaries": "<what this subtask explicitly does NOT cover>",
   "estimated_searches": <int>}}]}}"""
 
 SUBAGENT_REACT_SYSTEM = """\
@@ -183,6 +199,7 @@ You are a rigorous research quality auditor. Review the reports against the rese
 
 User query: {user_query}
 Research plan dimensions: {research_plan}
+Methodology (original research design intent): {methodology}
 Past subtasks: {past_subtasks}
 
 Sub-agent reports:
@@ -210,6 +227,8 @@ Instructions:
      In this case, set target_subtask_id to the id of the existing subtask that covers this dimension.
 
 6. If all dimensions score ≥ 0.6, return empty gap list and research-complete: true.
+
+7. Use the Methodology as background context to understand why the planner designed the research this way, but do NOT penalize sub-agents for discovering valuable angles that go beyond the original plan.
 
 Return JSON:
 {{
@@ -260,6 +279,7 @@ Requirements:
 9. The sub-agent reports below have been compressed by keeping only high-importance paragraphs (those with citations, data, or core arguments). Background and transitional paragraphs may have been removed. Focus on integrating the core findings and data.
 10. End with the exact marker <<END_OF_REPORT>> on its own line.
 11. Do NOT add a "References", "Sources", or "Bibliography" section at the end. The citation system will add references automatically.
+12. SOURCE DIVERSITY: Avoid over-relying on a single source. If the same [src: <url>] would be cited more than 3 times in the report, diversify by drawing on alternative sources for supporting evidence.
 
 Structure:
 # {user_query}

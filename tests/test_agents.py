@@ -224,7 +224,7 @@ async def test_generate_research_plan():
         mock_react.assert_called_once()
         call_kwargs = mock_react.call_args.kwargs
         assert call_kwargs["role"] == "planner"
-        assert call_kwargs["max_steps"] == 6
+        assert call_kwargs["max_steps"] == 10
 
 
 @pytest.mark.asyncio
