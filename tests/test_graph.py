@@ -23,9 +23,8 @@ def mock_deps():
 
         # Default config
         cfg = MagicMock()
-        cfg.default_provider = "openai"
+        cfg.base_url = "https://api.openai.com/v1"
         cfg.default_model = "gpt-4o"
-        cfg.max_iterations = 3
         cfg.quality_threshold = 0.7
         cfg.context_compress_retries = 1
         cfg.keep_tool_results = 5

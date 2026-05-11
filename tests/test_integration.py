@@ -17,19 +17,16 @@ def clear_config_cache():
 
 def test_config_save_and_reload_api():
     """Integration: save config via API, reload, verify values."""
-    from src.backend.config import get_config, load_config, AppConfig, ProviderConfig, RoleConfig
+    from src.backend.config import get_config, load_config, AppConfig, RoleConfig
 
-    with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=True):
+    with patch.dict("os.environ", {}, clear=True):
         cfg = AppConfig(
-            providers={
-                "openai": ProviderConfig(name="openai", type="openai", base_url="https://api.openai.com/v1", api_key="sk-test"),
-            },
-            default_provider="openai",
+            base_url="https://api.openai.com/v1",
+            api_key="sk-test",
             default_model="gpt-4o",
-            max_iterations=5,
             quality_threshold=0.85,
         )
-        cfg.roles["planner"] = RoleConfig(provider="openai", model="gpt-4o")
+        cfg.roles["planner"] = RoleConfig(model="gpt-4o")
 
         from src.backend.server import app
         from fastapi.testclient import TestClient
@@ -37,13 +34,13 @@ def test_config_save_and_reload_api():
         with patch("src.backend.server.init_db"), \
              patch("src.backend.server.get_config", return_value=cfg), \
              patch("src.backend.server.reload_config", return_value=cfg), \
-             patch("src.backend.server.save_config") as mock_save:
+             patch("src.backend.server.save_config") as mock_save, \
+             patch("src.backend.llm.invalidate_client_cache"):
             client = TestClient(app)
 
             resp = client.post("/api/config", json={
-                "default_provider": "openai",
+                "base_url": "https://api.openai.com/v1",
                 "default_model": "gpt-4o-mini",
-                "max_iterations": 7,
             })
             assert resp.status_code == 200
             assert resp.json()["status"] == "saved"
@@ -70,7 +67,7 @@ async def test_persistence_complete_run_flow():
 
             # Simulate a full research run
             run_id = "integration-run-1"
-            await pmod.persist_run(run_id, "What is quantum computing?", "openai", "gpt-4o")
+            await pmod.persist_run(run_id, "What is quantum computing?", "https://api.openai.com/v1", "gpt-4o")
 
             # Checkpoints at each phase
             phases = ["init", "plan", "split", "scale", "subagents", "reflection", "synthesis", "citation"]

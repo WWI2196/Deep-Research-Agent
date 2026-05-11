@@ -59,7 +59,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         s["sources"] = []
         s["completed_subtasks"] = []
         s["iteration_count"] = 0
-        s["max_iterations"] = s.get("max_iterations") or cfg.max_iterations
+        s["max_iterations"] = s.get("max_iterations") or 2
         s["research_complete"] = False
         s["quality_threshold"] = s.get("quality_threshold") or cfg.quality_threshold
         s["current_quality_score"] = 0.0
@@ -77,12 +77,12 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
 
         await trace("init", "node_enter", "Entering init node", {"run_id": s["run_id"], "query": s["user_query"]})
         await _emit({"type": "phase-update", "phase": "init",
-               "message": f"Initialised (provider: {cfg.default_provider}, model: {cfg.default_model})"})
+               "message": f"Initialised (model: {cfg.default_model})"})
         await _emit({"type": "progress", "phase": "init", "percent": 0})
         completed_weight += PHASE_WEIGHTS["init"]
-        await trace("init", "node_exit", "Init complete", {"provider": cfg.default_provider, "model": cfg.default_model})
+        await trace("init", "node_exit", "Init complete", {"model": cfg.default_model})
 
-        await persist_run(s["run_id"], s["user_query"], cfg.default_provider, cfg.default_model)
+        await persist_run(s["run_id"], s["user_query"], cfg.base_url, cfg.default_model)
         await persist_checkpoint(s["run_id"], "init", s)
         return s
 

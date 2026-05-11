@@ -1,7 +1,6 @@
 // ── Input page ───────────────────────────────────────────────────
 
-let inputDepth = 3;
-let selectedProvider = '';
+let inputDepth = 2;
 let selectedModel = '';
 let _selectedCollections = [];
 
@@ -22,7 +21,7 @@ async function startResearch() {
   if (_streamController) { _streamController.abort(); _streamController = null; }
 
   _streamController = startResearchStream(
-    query, inputDepth, selectedProvider, selectedModel, _selectedCollections,
+    query, inputDepth, selectedModel, _selectedCollections,
     (evt) => {
       if (evt.run_id && !store.get('currentRunId')) {
         store.set('currentRunId', evt.run_id);
@@ -86,22 +85,10 @@ function initInputPage() {
   (async () => {
     try {
       const cfg = await fetchConfig();
-      selectedProvider = cfg.default_provider;
-      selectedModel = cfg.default_model;
-
-      const providers = cfg.available_providers || [];
-      const select = document.getElementById('model-select');
-      select.innerHTML = '';
-      if (providers.length === 0) {
-        select.innerHTML = '<option>No provider configured</option>';
-      } else {
-        for (const p of providers) {
-          const sel = p === cfg.default_provider ? 'selected' : '';
-          select.innerHTML += `<option value="${p}" ${sel}>${p} / ${cfg.default_model}</option>`;
-        }
-      }
+      selectedModel = cfg.default_model || '';
+      document.getElementById('model-display').textContent = selectedModel || 'No model configured';
     } catch (e) {
-      document.getElementById('model-select').innerHTML = '<option>Unavailable</option>';
+      document.getElementById('model-display').textContent = 'Unavailable';
     }
   })();
 
@@ -111,10 +98,6 @@ function initInputPage() {
       btn.classList.add('active');
       inputDepth = parseInt(btn.dataset.depth);
     });
-  });
-
-  on(document.getElementById('model-select'), 'change', () => {
-    selectedProvider = document.getElementById('model-select').value;
   });
 
   on(document.getElementById('btn-start'), 'click', startResearch);

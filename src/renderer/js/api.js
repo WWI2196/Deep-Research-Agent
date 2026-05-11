@@ -21,21 +21,19 @@ async function apiPost(path, body) {
   return res.json();
 }
 
-async function startResearchApi(query, depth, provider, model, documentCollections) {
+async function startResearchApi(query, depth, model, documentCollections) {
   return apiPost('/api/research', {
     query,
     max_iterations: depth,
-    provider: provider || undefined,
     model: model || undefined,
     document_collections: documentCollections || undefined,
   });
 }
 
-function startResearchStream(query, depth, provider, model, documentCollections, onEvent, onError, onDone) {
+function startResearchStream(query, depth, model, documentCollections, onEvent, onError, onDone) {
   const body = JSON.stringify({
     query,
     max_iterations: depth,
-    provider: provider || undefined,
     model: model || undefined,
     document_collections: documentCollections || undefined,
   });

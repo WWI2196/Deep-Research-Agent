@@ -41,10 +41,9 @@ def test_subtask_list():
 
 def test_scaling_plan():
     from src.backend.models import ScalingPlan
-    sp = ScalingPlan(complexity="moderate", subagent_count=5, tool_calls_per_subagent=15, target_sources=25)
+    sp = ScalingPlan(complexity="moderate", subagent_count=5, target_sources=25)
     assert sp.complexity == "moderate"
     assert sp.subagent_count == 5
-    assert sp.tool_calls_per_subagent == 15
     assert sp.target_sources == 25
 
 
@@ -54,7 +53,6 @@ def test_research_request_defaults():
     assert req.query == "test"
     assert req.max_iterations is None
     assert req.quality_threshold is None
-    assert req.provider is None
     assert req.model is None
 
 
@@ -64,12 +62,10 @@ def test_research_request_all_fields():
         query="test",
         max_iterations=5,
         quality_threshold=0.8,
-        provider="openai",
         model="gpt-4o",
     )
     assert req.max_iterations == 5
     assert req.quality_threshold == 0.8
-    assert req.provider == "openai"
     assert req.model == "gpt-4o"
 
 
@@ -83,18 +79,18 @@ def test_research_response():
 def test_config_update_request_all_none():
     from src.backend.models import ConfigUpdateRequest
     req = ConfigUpdateRequest()
-    assert req.default_provider is None
+    assert req.base_url is None
+    assert req.api_key is None
     assert req.default_model is None
-    assert req.max_iterations is None
     assert req.quality_threshold is None
     assert req.roles is None
 
 
 def test_config_update_request_partial():
     from src.backend.models import ConfigUpdateRequest
-    req = ConfigUpdateRequest(default_provider="openai", max_iterations=7)
-    assert req.default_provider == "openai"
-    assert req.max_iterations == 7
+    req = ConfigUpdateRequest(base_url="https://api.example.com/v1", quality_threshold=0.8)
+    assert req.base_url == "https://api.example.com/v1"
+    assert req.quality_threshold == 0.8
     assert req.default_model is None
 
 

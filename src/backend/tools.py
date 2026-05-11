@@ -171,13 +171,18 @@ async def document_hybrid_search_tool(
 async def evaluate_sources_tool(
     candidates: list[dict[str, Any]],
     objective: str,
-    max_per_domain: int = 3,
+    max_per_domain: int | None = None,
 ) -> dict[str, Any]:
     """Evaluate source quality and select which ones deserve full-text extraction.
 
     Returns scored sources + a list of URLs selected for full-text reading.
     Internally uses batch LLM evaluation + source diversity enforcement.
     """
+    from .config import get_config
+
+    if max_per_domain is None:
+        max_per_domain = get_config().max_sources_per_domain
+
     if not candidates:
         return {"scored": [], "selected_for_fulltext": []}
 

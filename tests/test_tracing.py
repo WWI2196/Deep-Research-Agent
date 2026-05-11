@@ -22,7 +22,7 @@ def _mock_cfg(log_level="info"):
     """Return a minimal mock config with the given log_level."""
     cfg = type("C", (), {
         "log_level": log_level,
-        "default_provider": "openai",
+        "base_url": "https://api.openai.com/v1",
         "default_model": "gpt-4o",
     })()
     return cfg

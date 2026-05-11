@@ -18,11 +18,10 @@ def mock_get_config():
     """Mock the config system for server tests."""
     with patch("src.backend.server.get_config") as mock:
         cfg = MagicMock()
-        cfg.default_provider = "openai"
+        cfg.base_url = "https://api.openai.com/v1"
+        cfg.api_key = "sk-test"
         cfg.default_model = "gpt-4o"
-        cfg.max_iterations = 3
         cfg.quality_threshold = 0.7
-        cfg.providers = {"openai": MagicMock()}
         mock.return_value = cfg
         yield mock
 
@@ -60,7 +59,7 @@ def test_health_endpoint(client):
     data = response.json()
     assert data["status"] == "healthy"
     assert data["version"] == "1.0.0"
-    assert "provider" in data
+    assert "base_url" in data
     assert "model" in data
 
 
@@ -144,27 +143,27 @@ def test_get_config(client):
     response = client.get("/api/config")
     assert response.status_code == 200
     data = response.json()
-    assert "default_provider" in data
+    assert "base_url" in data
+    assert "api_key" in data
     assert "default_model" in data
-    assert "max_iterations" in data
     assert "quality_threshold" in data
-    assert "providers" in data
+    assert "roles" in data
 
 
 def test_update_config(client):
     with patch("src.backend.server.reload_config") as mock_reload, \
-         patch("src.backend.server.save_config") as mock_save:
+         patch("src.backend.server.save_config") as mock_save, \
+         patch("src.backend.llm.invalidate_client_cache"):
         cfg = MagicMock()
-        cfg.default_provider = "openai"
+        cfg.base_url = "https://api.openai.com/v1"
+        cfg.api_key = "sk-test"
         cfg.default_model = "gpt-4o"
-        cfg.max_iterations = 3
         cfg.quality_threshold = 0.7
-        cfg.providers = {"openai": MagicMock()}
         mock_reload.return_value = cfg
 
         response = client.post("/api/config", json={
-            "default_provider": "openai",
-            "max_iterations": 5,
+            "base_url": "https://api.openai.com/v1",
+            "default_model": "gpt-4o",
         })
         assert response.status_code == 200
         assert response.json()["status"] == "saved"
@@ -176,8 +175,8 @@ def test_list_models(client):
     response = client.get("/api/models")
     assert response.status_code == 200
     data = response.json()
-    assert "providers" in data
-    assert "details" in data
+    assert data["providers"] == []
+    assert data["details"] == {}
 
 
 # ── SSE stream endpoint ────────────────────────────────────────

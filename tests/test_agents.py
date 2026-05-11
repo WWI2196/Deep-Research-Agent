@@ -738,18 +738,21 @@ async def test_add_citations_adaptive_retry():
 async def test_chat_routes_to_correct_role():
     from src.backend.agents import _chat
 
-    with patch("src.backend.llm._get_or_create_provider") as mock_get_provider:
-        mock_provider = AsyncMock()
-        mock_provider.chat.return_value = "response"
-        mock_get_provider.return_value = mock_provider
+    with patch("src.backend.llm.AsyncOpenAI") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "response"
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_client_cls.return_value = mock_client
 
         result = await _chat(
             role="planner",
             messages=[{"role": "user", "content": "test"}],
         )
         assert result == "response"
-        mock_get_provider.assert_called_once()
-        mock_provider.chat.assert_called_once()
+        mock_client_cls.assert_called_once()
+        mock_client.chat.completions.create.assert_called_once()
 
 
 # ── synthesize_report with failure_summary ─────────────────────

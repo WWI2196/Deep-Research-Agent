@@ -132,7 +132,7 @@ async def start_research(request: ResearchRequest) -> ResearchResponse:
         "run_id": run_id,
         "events": [],
         "errors": [],
-        "max_iterations": request.max_iterations or cfg.max_iterations,
+        "max_iterations": request.max_iterations or 2,
         "quality_threshold": request.quality_threshold or cfg.quality_threshold,
         "context_compress_retries": request.context_compress_retries or cfg.context_compress_retries,
         "keep_tool_results": request.keep_tool_results or cfg.keep_tool_results,
@@ -146,7 +146,7 @@ async def start_research(request: ResearchRequest) -> ResearchResponse:
         "task": task,
     }
 
-    await persist_run(run_id, request.query, cfg.default_provider, cfg.default_model)
+    await persist_run(run_id, request.query, cfg.base_url, cfg.default_model)
     return ResearchResponse(run_id=run_id, status="started")
 
 
@@ -171,9 +171,8 @@ async def stream_research(request: ResearchRequest):
 
         yield serialize_event("phase-update", {
             "phase": "init",
-            "message": f"Starting research (provider: {cfg.default_provider}, model: {cfg.default_model})",
+            "message": f"Starting research (model: {cfg.default_model})",
             "run_id": run_id,
-            "provider": cfg.default_provider,
             "model": cfg.default_model,
         })
 
@@ -183,7 +182,7 @@ async def stream_research(request: ResearchRequest):
                 "run_id": run_id,
                 "events": [],
                 "errors": [],
-                "max_iterations": request.max_iterations or cfg.max_iterations,
+                "max_iterations": request.max_iterations or 2,
                 "quality_threshold": request.quality_threshold or cfg.quality_threshold,
                 "context_compress_retries": request.context_compress_retries or cfg.context_compress_retries,
                 "keep_tool_results": request.keep_tool_results or cfg.keep_tool_results,
@@ -240,7 +239,6 @@ async def stream_research(request: ResearchRequest):
                 "total_sources": source_count,
                 "total_reports": report_count,
                 "iterations": iterations,
-                "provider": cfg.default_provider,
                 "model": cfg.default_model,
             })
 
@@ -343,17 +341,17 @@ async def get_report(run_id: str):
 @app.get("/api/config")
 async def get_app_config():
     cfg = get_config()
-    visible = {name: {"type": pc.type} for name, pc in cfg.providers.items() if pc.api_key}
+    api_key_masked = ""
+    if cfg.api_key:
+        api_key_masked = cfg.api_key[:4] + "****" + cfg.api_key[-4:] if len(cfg.api_key) > 8 else "****"
     return {
-        "default_provider": cfg.default_provider,
+        "base_url": cfg.base_url,
+        "api_key": api_key_masked,
         "default_model": cfg.default_model,
-        "max_iterations": cfg.max_iterations,
         "quality_threshold": cfg.quality_threshold,
         "context_compress_retries": cfg.context_compress_retries,
         "keep_tool_results": cfg.keep_tool_results,
         "log_level": cfg.log_level,
-        "providers": visible,
-        "available_providers": list(visible.keys()),
         "roles": cfg.to_dict().get("roles", {}),
     }
 
@@ -361,12 +359,12 @@ async def get_app_config():
 @app.post("/api/config")
 async def update_config(request: ConfigUpdateRequest):
     cfg = reload_config()
-    if request.default_provider is not None:
-        cfg.default_provider = request.default_provider
+    if request.base_url is not None:
+        cfg.base_url = request.base_url
+    if request.api_key is not None:
+        cfg.api_key = request.api_key
     if request.default_model is not None:
         cfg.default_model = request.default_model
-    if request.max_iterations is not None:
-        cfg.max_iterations = request.max_iterations
     if request.quality_threshold is not None:
         cfg.quality_threshold = request.quality_threshold
     if request.context_compress_retries is not None:
@@ -379,10 +377,11 @@ async def update_config(request: ConfigUpdateRequest):
         from .config import RoleConfig
         for role_name, role_data in request.roles.items():
             cfg.roles[role_name] = RoleConfig(
-                provider=role_data.get("provider", cfg.default_provider),
                 model=role_data.get("model", cfg.default_model),
             )
     save_config(cfg)
+    from . import llm
+    llm.invalidate_client_cache()
     return {"status": "saved"}
 
 
@@ -392,16 +391,14 @@ async def health():
     return {
         "status": "healthy",
         "version": "1.0.0",
-        "provider": cfg.default_provider,
+        "base_url": cfg.base_url,
         "model": cfg.default_model,
     }
 
 
 @app.get("/api/models")
 async def list_models():
-    cfg = get_config()
-    visible = {name: {"type": pc.type} for name, pc in cfg.providers.items() if pc.api_key}
-    return {"providers": list(visible.keys()), "details": visible}
+    return {"providers": [], "details": {}}
 
 
 # ── Tracing / Logs ──────────────────────────────────────────────

@@ -4,27 +4,25 @@ async function initSettingsPage() {
   const container = document.getElementById('settings-form');
   try {
     const cfg = await fetchConfig();
-    const providers = cfg.available_providers || [];
-
-    const providerOptions = providers.map(p =>
-      `<option value="${p}" ${p === cfg.default_provider ? 'selected' : ''}>${p}</option>`
-    ).join('');
 
     container.innerHTML = `
       <div class="settings-section">
-        <h3>Default Model</h3>
+        <h3>LLM Configuration</h3>
         <div class="settings-row">
-          <label>Provider</label>
-          <select id="s-default-provider">${providerOptions}</select>
+          <label>Base URL</label>
+          <input id="s-base-url" type="text" value="${escapeHtml(cfg.base_url || '')}" placeholder="https://api.openai.com/v1">
         </div>
         <div class="settings-row">
-          <label>Model</label>
+          <label>API Key</label>
+          <input id="s-api-key" type="password" value="${escapeHtml(cfg.api_key || '')}" placeholder="sk-...">
+        </div>
+        <div class="settings-row">
+          <label>Default Model</label>
           <input id="s-default-model" type="text" value="${escapeHtml(cfg.default_model || '')}" placeholder="e.g. gpt-4o">
         </div>
-        <div class="settings-row">
-          <label>Max Iterations</label>
-          <input id="s-max-iterations" type="number" min="1" max="10" value="${cfg.max_iterations || 3}">
-        </div>
+      </div>
+      <div class="settings-section">
+        <h3>Research Defaults</h3>
         <div class="settings-row">
           <label>Quality Threshold</label>
           <input id="s-quality-threshold" type="number" min="0" max="1" step="0.05" value="${cfg.quality_threshold || 0.7}">
@@ -40,16 +38,16 @@ async function initSettingsPage() {
 }
 
 async function saveSettings() {
-  const provider = document.getElementById('s-default-provider').value;
+  const baseUrl = document.getElementById('s-base-url').value.trim();
+  const apiKey = document.getElementById('s-api-key').value.trim();
   const model = document.getElementById('s-default-model').value.trim();
-  const maxIterations = parseInt(document.getElementById('s-max-iterations').value);
   const qualityThreshold = parseFloat(document.getElementById('s-quality-threshold').value);
 
   try {
     await saveConfig({
-      default_provider: provider,
+      base_url: baseUrl,
+      api_key: apiKey,
       default_model: model,
-      max_iterations: maxIterations,
       quality_threshold: qualityThreshold,
     });
     document.getElementById('settings-msg').innerHTML = '<span style="color:var(--green)">Settings saved successfully.</span>';

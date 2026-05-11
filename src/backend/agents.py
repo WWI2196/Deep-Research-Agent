@@ -27,7 +27,7 @@ from .helpers import (
     pick_first_nonempty as _pick_first_nonempty,
 )
 from .llm import chat as _chat
-from .llm import invalidate_provider_cache
+from .llm import invalidate_client_cache
 from .planning import generate_research_plan, split_into_subtasks
 from .subagent import (
     _refine_queries_if_needed,

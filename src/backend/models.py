@@ -24,7 +24,6 @@ class SubtaskList(BaseModel):
 class ScalingPlan(BaseModel):
     complexity: str
     subagent_count: int
-    tool_calls_per_subagent: int
     target_sources: int
 
 
@@ -36,7 +35,6 @@ class ResearchRequest(BaseModel):
     quality_threshold: float | None = None
     context_compress_retries: int | None = None
     keep_tool_results: int | None = None
-    provider: str | None = None
     model: str | None = None
     document_collections: list[str] | None = None
 
@@ -47,9 +45,9 @@ class ResearchResponse(BaseModel):
 
 
 class ConfigUpdateRequest(BaseModel):
-    default_provider: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
     default_model: str | None = None
-    max_iterations: int | None = None
     quality_threshold: float | None = None
     context_compress_retries: int | None = None
     keep_tool_results: int | None = None
