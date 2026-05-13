@@ -155,9 +155,15 @@ Rules:
 - If search returns poor results, try refined queries or different source types.
 - Preserve the query language in your report.
 
+CRITICAL — final_answer behavior:
+- When you are ready to finish, output JSON with a "final_answer" FIELD containing your COMPLETE markdown report.
+- "final_answer" is a JSON FIELD, NOT a tool to call. Do NOT write "action": "final_answer".
+- The "final_answer" must be the FULL report text (800-1500+ words), not a summary, not an outline.
+- If you previously called submit_report with a long report, your final_answer MUST be at least as long.
+
 Respond with JSON only. Either:
   {{"thought": "...", "action": "tool_name", "action_input": {{"arg": "value"}}}}
-  {{"thought": "...", "final_answer": "# Title..."}}"""
+  {{"thought": "...", "final_answer": "# Full Report Title\\n\\n## Summary\\n..."}}"""
 
 SUBAGENT_REPORT = """\
 You are a specialized research sub-agent. Write a markdown report for your subtask.
@@ -212,23 +218,29 @@ Instructions:
    - evidence: quality and verifiability of sources supporting claims
    - instruction_following: how precisely the report addresses this dimension's specific requirements
 
-2. Calculate an overall_score as the average across all dimension scores (all axes).
+2. CONTENT DEPTH CHECK (mandatory):
+   - For each dimension, estimate the word count of its synthesized content in the final report.
+   - If ANY dimension's content is thinner than 500 words (or feels like an outline rather than analytical prose), that is a CRITICAL gap.
+   - If ANY dimension has fewer than 3 unique source citations, that is also a gap.
+   - These depth gaps should generate supplement_existing items regardless of the 4-axis score.
 
-3. ONLY generate gap-fill items for dimensions where the composite score (avg of 4 axes) is below 0.6.
+3. Calculate an overall_score as the average across all dimension scores (all axes).
+
+4. ONLY generate gap-fill items for dimensions where the composite score (avg of 4 axes) is below 0.6 OR where the depth check failed.
    Maximum 3 gap items total.
 
-4. For each gap, estimate the expected_score_improvement (how much fixing this gap would raise the overall_score). If expected_score_improvement < 0.1, do NOT include this gap — it is not worth the extra iteration.
+5. For each gap, estimate the expected_score_improvement (how much fixing this gap would raise the overall_score). If expected_score_improvement < 0.1, do NOT include this gap — it is not worth the extra iteration.
 
-5. For each gap, determine the gap_type:
+6. For each gap, determine the gap_type:
    - "new_subtask": The missing content is a distinct, independent topic that requires its own investigation.
      Generate a full subtask with a NEW unique id.
    - "supplement_existing": The missing content is additional evidence or depth for an ALREADY COVERED dimension.
      The gap can be addressed by having the existing subagent do MORE targeted searches.
      In this case, set target_subtask_id to the id of the existing subtask that covers this dimension.
 
-6. If all dimensions score ≥ 0.6, return empty gap list and research-complete: true.
+7. If all dimensions score ≥ 0.6 AND all pass the depth check, return empty gap list and research-complete: true.
 
-7. Use the Methodology as background context to understand why the planner designed the research this way, but do NOT penalize sub-agents for discovering valuable angles that go beyond the original plan.
+8. Use the Methodology as background context to understand why the planner designed the research this way, but do NOT penalize sub-agents for discovering valuable angles that go beyond the original plan.
 
 Return JSON:
 {{
@@ -254,10 +266,11 @@ Return JSON:
 }}"""
 
 SYNTHESIS = """\
-You are the Lead Research Coordinator. Synthesize all sub-agent reports into a comprehensive, publication-quality research report.
+You are a Senior Research Analyst. Your task is to produce a deeply analytical research report that teaches the reader the underlying mechanisms, not merely summarizes existing work.
 
 User query: {user_query}
 Methodology: {methodology}
+Output language: {output_language}
 
 Expected structure (MANDATORY — create every section listed, use the exact headings, and do NOT merge, skip, or omit any section):
 {output_structure}
@@ -268,18 +281,21 @@ Sub-agent reports:
 {failure_summary}
 
 Requirements:
-1. Write 3000–5000 words of comprehensive, flowing analytical prose. Each section MUST be fully developed with depth and detail — do not skim over any dimension.
+1. Write comprehensive, flowing analytical prose with no specific word limit. Each section MUST be fully developed with depth and detail — do not skim over any dimension. The report should be as long as necessary to thoroughly cover the topic.
 2. STRICT SECTION COMPLIANCE: The final report MUST contain every section listed in Expected structure, with the exact headings provided. Do NOT merge multiple expected sections into one, do NOT skip sections, and do NOT reduce the number of sections.
-3. Within each section, INTEGRATE findings from relevant sub-agent reports. Find connections, contradictions, and cross-cutting themes. Multiple reports may contribute to the same section. Do not merely summarize each sub-report in isolation.
-4. Use the exact section headings from Expected structure as ## headings in the report.
-5. When evidence conflicts, analyze which sources are more credible and why.
-6. Include specific data, statistics, dates, names where available.
-7. CITATION PRESERVATION IS MANDATORY: Every factual claim must retain its original [src: <url>] marker from the sub-agent reports. This includes https:// URLs AND file:// URLs. Dropping a citation is a critical error. Use them exactly as they appear — do not rewrite, abbreviate, or omit them.
-8. CITATION ACCURACY: Only attach a [src: <url>] marker to a statement if the evidence from that specific sub-agent report directly supports it. If you are unsure whether a source supports a particular claim, remove the citation and state the claim without attribution rather than risk a false association.
-9. The sub-agent reports below have been compressed by keeping only high-importance paragraphs (those with citations, data, or core arguments). Background and transitional paragraphs may have been removed. Focus on integrating the core findings and data.
-10. End with the exact marker <<END_OF_REPORT>> on its own line.
-11. Do NOT add a "References", "Sources", or "Bibliography" section at the end. The citation system will add references automatically.
-12. SOURCE DIVERSITY: Avoid over-relying on a single source. If the same [src: <url>] would be cited more than 3 times in the report, diversify by drawing on alternative sources for supporting evidence.
+3. DEPTH OVER BREADTH: Your primary goal is ANALYTICAL DEPTH. For every claim you make, explain the underlying MECHANISM — how does this technology or method actually work? Establish CAUSAL CHAINS — why does it perform this way under different conditions?
+4. Within each section, INTEGRATE findings from relevant sub-agent reports. Find connections, contradictions, and cross-cutting themes. Multiple reports may contribute to the same section. Do not merely summarize each sub-report in isolation.
+5. Use the exact section headings from Expected structure as ## headings in the report.
+6. When evidence conflicts, analyze which sources are more credible and why.
+7. Include specific data, statistics, dates, names where available. Use QUANTITATIVE evidence whenever possible — exact numbers, performance metrics, benchmark comparisons.
+8. CITATION PRESERVATION IS MANDATORY: Every factual claim must retain its original [src: <url>] marker from the sub-agent reports. This includes https:// URLs AND file:// URLs. Dropping a citation is a critical error. Use them exactly as they appear — do not rewrite, abbreviate, or omit them.
+9. CITATION ACCURACY: Only attach a [src: <url>] marker to a statement if the evidence from that specific sub-agent report directly supports it. If you are unsure whether a source supports a particular claim, remove the citation and state the claim without attribution rather than risk a false association.
+10. FULL SOURCE UTILIZATION: The sub-agent reports contain evidence from many sources. Do NOT discard sources just because they appear in compressed sections. Draw on ALL relevant evidence to build rich, well-supported sections.
+11. The sub-agent reports below have been compressed by keeping only high-importance paragraphs (those with citations, data, or core arguments). Background and transitional paragraphs may have been removed. Focus on integrating the core findings and data.
+12. LANGUAGE: The ENTIRE report MUST be written in {output_language}. Do NOT switch languages mid-report. Do NOT write sections in English if the requested language is Chinese, and vice versa. This applies to all headings, body text, and citations.
+13. End with the exact marker <<END_OF_REPORT>> on its own line.
+14. Do NOT add a "References", "Sources", or "Bibliography" section at the end. The citation system will add references automatically.
+15. SOURCE DIVERSITY: Avoid over-relying on a single source. If the same [src: <url>] would be cited more than 3 times in the report, diversify by drawing on alternative sources for supporting evidence.
 
 Structure:
 # {user_query}
@@ -287,6 +303,28 @@ Structure:
 ## [Use the second item from Expected structure]
 ...continue for every item in Expected structure...
 <<END_OF_REPORT>>"""
+
+DEEPEN_SECTION = """\
+You are deepening a thin section of a research report. Expand it with rigorous analytical depth.
+
+Research topic: {user_query}
+Section: {section_title}
+Current content ({current_length} chars):
+{current_content}
+
+Relevant evidence from sub-agent reports:
+{relevant_evidence}
+
+Requirements:
+1. Expand this section to at least 800 words of deep analytical prose.
+2. Explain the underlying MECHANISMS: how does this technology or method actually work? What are the key architectural or algorithmic innovations?
+3. Establish CAUSAL CHAINS: why does it perform this way under different conditions? What factors drive the observed behavior?
+4. Include QUANTITATIVE evidence: specific numbers, performance metrics, benchmark comparisons, dates, and named studies.
+5. Discuss LIMITATIONS and DEBATES: what do different researchers disagree on? What are the open problems?
+6. Preserve all [src: <url>] citations. Add more citations from the evidence where needed.
+7. Write in {output_language}.
+
+Output ONLY the expanded section content (including its heading). Do not add preamble or commentary."""
 
 FAILURE_SUMMARY = """\
 You are a research quality analyst. Your task is to analyze why a research synthesis

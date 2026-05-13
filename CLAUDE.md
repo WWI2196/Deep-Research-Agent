@@ -7,12 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # Python (uv)
 uv sync                                    # install all deps + venv
-uv sync --group dev                        # include dev deps (pytest, ruff, mypy)
+uv sync --group dev                        # include dev deps (ruff, mypy)
 uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787  # start server
-
-# Tests
-uv run pytest tests/ -v                    # backend tests
-uv run pytest tests/test_agents.py -v      # single test file
 
 # Lint & type check
 uv run ruff check src/                     # lint
@@ -32,37 +28,30 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
   - `server.py` — FastAPI app, REST endpoints + SSE streaming. 23 endpoints total (9 research + 12 document + 2 tracing).
   - `config.py` — Configuration loading (env var > config.yaml > built-in default). `save_config()` preserves unmanaged sections (providers, search). New: `context_compress_retries`, `keep_tool_results`.
   - `models.py` — `ResearchState` TypedDict + Pydantic models. New: `document_collections` field.
-  - `graph.py` — LangGraph `StateGraph` with **7 async nodes**, `build_and_run_graph()`
+  - `graph.py` — LangGraph `StateGraph` with **7 async nodes**, `build_and_run_graph()`. State maintains `_subtask_report_map: dict[str, str]` for precise deduplication when reflection re-runs subtasks.
   - `llm.py` — Unified async `chat()` routing with per-role provider selection + TTL caching
   - `agents.py` — Backward-compatible re-export shim (prefer importing from specific modules)
   - `helpers.py` — Pure text/JSON utilities (extract_json, clean_think_tags, needs_continuation, enforce_source_diversity, query_similarity, generate_broader_queries, etc.). New: `normalize_search_item` preserves original `source` field.
   - `planning.py` — Planning-phase agents: `generate_research_plan` (structured JSON), `split_into_subtasks` (self-heal retry)
   - `subagent.py` — Subagent orchestration: fuzzy-dedup `generate_search_queries`, `batch_evaluate_sources` (merged score+select), `run_subagent` (query cache, empty-result rollback, evidence compression, [src:] marker validation), `run_subagents_parallel`. New: `_search_document_collections()` parallel document hybrid retrieval.
-  - `synthesis.py` — Synthesis: `synthesize_report` (single-pass + truncation continuation + failure summary retry), `add_citations` (rule-based [src: url] → [^n] + URL liveness verification + auto strip duplicate References), `_generate_failure_summary`
+  - `synthesis.py` — Synthesis: `synthesize_report` (single-pass + truncation continuation + failure summary retry), `add_citations` (rule-based [src: url] → [^n] + URL liveness verification + auto strip duplicate References), `_generate_failure_summary`, `_deepen_thin_sections` (expands thin sections with high-importance evidence). Section replacement ensures trailing `\n\n` to prevent heading粘连.
   - `search.py` — SearXNG search + dual-path content extraction (`requests` + `trafilatura` fast path; `Crawl4AI` browser-render fallback for JS-heavy pages)
   - `prompts.py` — System prompt templates for 6 roles + evaluation. Subagent/Synthesis prompts removed automatic Sources/References generation, use inline citations only.
-  - `persistence.py` — SQLite persistence (runs, checkpoints, sources, subagent_reports, **collections, documents**). All I/O via `asyncio.to_thread`.
+  - `persistence.py` — SQLite persistence (runs, checkpoints, sources, subagent_reports, **collections, documents**). All I/O via `asyncio.to_thread`. `update_run_status` only sets `completed_at` for terminal states (completed/cancelled/failed).
   - `export.py` — Markdown export
   - `document_store.py` — **v3** Chroma + bm25s + RRF hybrid retrieval core. `DocumentStore` class encapsulates vector store, keyword index, document management. Supports async parsing, re-indexing, category filtering.
   - `document_parser.py` — **v3** PDF/DOCX/TXT/MD/HTML unified parsing entry
-  - `tracing.py` — **v3** Structured tracing for research runs. `trace()` / `trace_llm_call()` use `contextvars` to propagate `run_id` implicitly through async call stacks. Log levels: debug/info/warning/error, controlled by `AppConfig.log_level`.
+  - `tracing.py` — **v3** Structured tracing for research runs. `trace()` / `trace_llm_call()` use `contextvars` to propagate `run_id` implicitly through async call stacks. Log levels: debug/info/warning/error, controlled by `AppConfig.log_level`. `trace_llm_call` stores `error` as `None` when absent (not empty string) to avoid false positives in `error IS NOT NULL` queries.
   - `providers/` — `OpenAICompatibleProvider` and `AnthropicProvider` (+ base class with exponential backoff)
 - `src/renderer/` — Frontend UI (Vanilla JS, no framework), served as static files by FastAPI
   - Components: `input.js`, `dashboard.js`, `phases.js`, `subagents.js`, `sources.js`, `report.js`, `settings.js`, `history.js`
   - **New**: `library.js` — Document library management page (create/delete/upload/reindex)
   - **New**: `log-viewer.js` — Debug log viewer with phase/type filters, search, expandable details, and LLM-call latency display. Attachable to report page and history rows.
   - Infrastructure: `app.js` (router + page lifecycle), `api.js` (HTTP+SSE), `store.js` (`createStore()` event-driven state)
-- `tests/` — pytest suite (218 backend tests)
-  - `test_providers/` — Provider tests (anthropic, openai_compatible, factory)
-  - **New**: `test_document_store.py` — DocumentStore CRUD + hybrid retrieval tests
-  - **New**: `test_tracing.py` — Tracing contextvar and trace log level filtering tests
-  - **New**: `test_search.py` — Search + extract (trafilatura + Crawl4AI fallback) tests
-  - **New**: `test_tools.py` — Research tools (search, evaluate, fetch_fulltext, synthesize, report) tests
-  - **New**: `test_react_agent.py` — ReAct agent loop tests
 
-**Pipeline**: LangGraph `StateGraph` with **7 async nodes** in [src/backend/graph.py](src/backend/graph.py). Flow: `init → plan → split → subagents → reflection → (loop or proceed) → synthesize → cite → END`. Scale node removed; budget per subtask via `estimated_searches` field. New: synthesis retry on truncation/low-quality with failure summary; cite node runs concurrent URL liveness check.
+**Pipeline**: LangGraph `StateGraph` with **7 async nodes** in [src/backend/graph.py](src/backend/graph.py). Flow: `init → plan → split → subagents → reflection → (loop or proceed) → synthesize → cite → END`. Scale node removed; budget per subtask via `estimated_searches` field. Reflection re-runs use `_subtask_report_map` for precise subtask_id-based deduplication. New: synthesis retry on truncation/low-quality with failure summary; cite node runs concurrent URL liveness check; `_deepen_thin_sections` expands thin sections with trailing newline guard.
 
-**State**: `ResearchState` (TypedDict in [src/backend/models.py](src/backend/models.py)) — holds query, plan (dict), subtasks, subagent reports, sources, iteration count, cited report, memory, query_cache, synthesis_retry_count, context_compress_retries, keep_tool_results, **document_collections**. `research_plan` is now a structured dict with `dimensions`, `output_structure`, `methodology`.
+**State**: `ResearchState` (TypedDict in [src/backend/models.py](src/backend/models.py)) — holds query, plan (dict), subtasks, subagent reports, sources, iteration count, cited report, memory, query_cache, synthesis_retry_count, context_compress_retries, keep_tool_results, **document_collections**. `research_plan` is now a structured dict with `dimensions`, `output_structure`, `methodology`. Additionally maintains `_subtask_report_map: dict[str, str]` (subtask_id → report) for precise deduplication when reflection re-runs subtasks.
 
 **LLM routing** ([src/backend/config.py](src/backend/config.py)): Priority chain: env var > `~/.deep-research/config.yaml` > built-in default. 7 roles (planner, splitter, subagent, evaluator, coordinator, reflection, citation) can each use a different provider+model. Config supports `${VAR}` env substitution. Six built-in providers: mimo, openai, anthropic, gemini, deepseek, openrouter.
 
@@ -85,7 +74,7 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 - `generate_search_queries`: **Rules-based** (no LLM) — keywords × source_type modifiers + fuzzy Jaccard dedup. Fallback to title if no keywords.
 - `batch_evaluate_sources`: Single LLM call per batch — scores quality AND decides full_text in one response (merged SOURCE_EVALUATE prompt)
 - `run_subagent`: 6-step flow — rules queries → SearXNG search (query cache + empty-result rollback) + **document library hybrid search** → evaluate+select → `extract_async()` (trafilatura fast path + Crawl4AI browser fallback) → build evidence (keep_tool_results compression) → write report with `[src: url]` markers. Retries on empty report or missing citations.
-- `synthesize_report`: Single-pass LLM with max_tokens=16384, 6-round truncation continuation, failure_summary inject for retry. Fallback to concatenation.
+- `synthesize_report`: Single-pass LLM with max_tokens=16384, 6-round truncation continuation, failure_summary inject for retry. Fallback to concatenation. `_deepen_thin_sections` expands thin sections with high-importance evidence; replacement ensures trailing `\n\n` to prevent heading粘连.
 - `add_citations`: **Rule-based** (no LLM) — parses `[src: url]`, normalizes URLs, deduplicates, assigns `[^n]`, generates References, concurrently verifies URL accessibility via trafilatura, marks unverified sources. **Auto strips duplicate References/Sources sections generated by LLM**.
 - `_generate_failure_summary`: Generates compact post-mortem for synthesis retry (what happened, covered, missing, remaining findings)
 - `_verify_citation_urls`: Concurrent 8-way trafilatura fetch to check URL liveness (10s timeout each). `file://` paths checked with `Path.exists()`.
@@ -145,6 +134,5 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 
 - SearXNG must be running for search to work (`docker compose up -d` in `~/searxng/`)
 - Start server with `uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787`, then open `http://127.0.0.1:8787` in browser
-- All changes must maintain 218 Python tests passing
 - Content extraction: `requests` + `trafilatura` fast path, `Crawl4AI` browser-render fallback for JS-heavy pages; no paid scraping APIs
 - `save_config()` must preserve `providers` and other unmanaged sections in config.yaml

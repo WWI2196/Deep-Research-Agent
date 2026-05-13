@@ -1,4 +1,4 @@
-"""Search layer — SearXNG for search, trafilatura + Crawl4AI for content extraction.
+"""Search layer — SearXNG for search, Crawl4AI for content extraction.
 
 Always returns ``{"data": [...]}`` shape for search, plain markdown for extract.
 """
@@ -102,68 +102,16 @@ def _resolve_url(url: str) -> str:
     return url
 
 
-# ── trafilatura content extraction ──────────────────────────────
-
-def extract(url: str) -> str | None:
-    """Fetch page content as clean markdown via trafilatura or PDF parser. Returns None on failure."""
-    url = _resolve_url(url)
-
-    # PDF path
-    if url.lower().endswith(".pdf"):
-        return _extract_pdf(url)
-
-    try:
-        import trafilatura
-    except ImportError:
-        logger.warning("trafilatura not installed; extract disabled")
-        return None
-
-    try:
-        import requests
-        resp = requests.get(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/126.0.0.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-            },
-            timeout=20,
-        )
-        resp.raise_for_status()
-        text = trafilatura.extract(resp.text, output_format="markdown", with_metadata=True)
-        return text.strip() if text else None
-    except Exception as exc:
-        logger.warning("trafilatura extract failed for %s: %s", url[:60], exc)
-        return None
-
-
-# ── Crawl4AI async extraction (fallback for JS-rendered pages) ──
+# ── Crawl4AI async extraction ───────────────────────────────────
 
 async def extract_async(url: str, min_length: int = 500) -> str | None:
-    """Fetch page content: trafilatura fast path, Crawl4AI fallback.
-
-    Tries trafilatura first (lightweight, no browser). If the result is empty
-    or shorter than *min_length* characters, falls back to Crawl4AI which uses
-    a headless browser and can render JavaScript-heavy pages.
-    """
+    """Fetch page content via Crawl4AI headless browser. Returns None on failure."""
     resolved = _resolve_url(url)
 
     # PDF path — run sync extractor in thread
     if resolved.lower().endswith(".pdf"):
         return await asyncio.to_thread(_extract_pdf, resolved)
 
-    # Fast path: trafilatura
-    text = await asyncio.to_thread(extract, resolved)
-    if text and len(text.strip()) >= min_length:
-        return text
-
-    # Fallback: Crawl4AI for JS-rendered or short-content pages
     try:
         from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 
@@ -186,21 +134,22 @@ async def extract_async(url: str, min_length: int = 500) -> str | None:
                     return md.strip() if md else None
             return None
 
-        text_crawl = await _try_crawl()
-        if text_crawl is None:
+        text = await _try_crawl()
+        if text is None:
             # Retry with system Chrome if bundled Chromium is missing
-            text_crawl = await _try_crawl(channel="chrome")
-        if text_crawl:
-            return text_crawl
+            text = await _try_crawl(channel="chrome")
+        if text and len(text.strip()) >= min_length:
+            return text
+        return text if text else None
     except ImportError:
-        logger.debug("crawl4ai not installed; skipping JS fallback")
+        logger.warning("crawl4ai not installed; extract disabled")
+        return None
     except asyncio.TimeoutError:
         logger.warning("Crawl4AI timeout for %s", resolved[:60])
+        return None
     except Exception as exc:
-        logger.warning("Crawl4AI fallback failed for %s: %s", resolved[:60], exc)
-
-    # Return trafilatura result even if short; None if both failed
-    return text if text else None
+        logger.warning("Crawl4AI extract failed for %s: %s", resolved[:60], exc)
+        return None
 
 
 # ── Public API ───────────────────────────────────────────────────

@@ -37,6 +37,7 @@ class ResearchRequest(BaseModel):
     keep_tool_results: int | None = None
     model: str | None = None
     document_collections: list[str] | None = None
+    output_language: str | None = None
 
 
 class ResearchResponse(BaseModel):
@@ -91,6 +92,7 @@ class ResearchState(TypedDict, total=False):
     keep_tool_results: int
     query_cache: dict[str, list[dict[str, Any]]]
     document_collections: list[str]
+    output_language: str
     # Agentic RAG negotiation fields
     gap_instructions: list[dict[str, Any]]
     tool_call_history: list[dict[str, Any]]

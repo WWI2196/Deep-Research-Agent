@@ -127,6 +127,7 @@ def init_db() -> None:
             run_id TEXT NOT NULL,
             call_id TEXT NOT NULL,
             role TEXT NOT NULL,
+            phase TEXT,
             provider TEXT NOT NULL,
             model TEXT NOT NULL,
             temperature REAL,
@@ -155,6 +156,11 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_trace_logs_phase ON trace_logs(phase);
         CREATE INDEX IF NOT EXISTS idx_trace_logs_event_type ON trace_logs(event_type);
     """)
+    # Migrate existing databases: add phase column if missing
+    try:
+        conn.execute("ALTER TABLE llm_calls ADD COLUMN phase TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -174,9 +180,11 @@ async def update_run_status(
     iterations: int = 0,
     report_path: str = "",
 ) -> None:
+    # Only set completed_at for terminal states; otherwise preserve existing value.
+    completed_at = int(time.time()) if status in ("completed", "cancelled", "failed") else None
     await _write_async(lambda conn: conn.execute(
-        "UPDATE runs SET status=?, total_sources=?, total_reports=?, iterations=?, completed_at=?, report_path=? WHERE run_id=?",
-        (status, total_sources, total_reports, iterations, int(time.time()), report_path, run_id),
+        "UPDATE runs SET status=?, total_sources=?, total_reports=?, iterations=?, completed_at=COALESCE(?, completed_at), report_path=? WHERE run_id=?",
+        (status, total_sources, total_reports, iterations, completed_at, report_path, run_id),
     ))
 
 
@@ -433,14 +441,15 @@ async def persist_llm_call(
     error: str = "",
     temperature: float | None = None,
     max_tokens: int | None = None,
+    phase: str = "llm",
 ) -> None:
     await _write_async(lambda conn: conn.execute(
         """
         INSERT INTO llm_calls
-        (run_id, call_id, role, provider, model, temperature, max_tokens, messages, response, latency_ms, retry_attempt, error, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (run_id, call_id, role, provider, model, temperature, max_tokens, messages, response, latency_ms, retry_attempt, error, phase, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (run_id, call_id, role, provider, model, temperature, max_tokens, messages, response, latency_ms, retry_attempt, error, int(time.time())),
+        (run_id, call_id, role, provider, model, temperature, max_tokens, messages, response, latency_ms, retry_attempt, error, phase, int(time.time())),
     ))
 
 
@@ -533,7 +542,7 @@ def get_run_timeline(run_id: str, limit: int = 3000) -> list[dict[str, Any]]:
         SELECT
             'llm' as source,
             id,
-            'llm' as phase,
+            COALESCE(phase, 'llm') as phase,
             'llm_call' as type,
             'info' as level,
             'LLM call [' || role || '] ' || CASE WHEN error IS NULL OR error='' THEN 'success' ELSE 'error' END as message,

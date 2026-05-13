@@ -27,6 +27,10 @@ current_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_run_id", default=None
 )
 
+current_phase: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_phase", default=None
+)
+
 
 def _effective_level() -> int:
     cfg = get_config()
@@ -128,6 +132,7 @@ async def trace_llm_call(
         run_id=run_id,
         call_id=call_id,
         role=role,
+        phase=current_phase.get() or "llm",
         provider=provider,
         model=model,
         temperature=temperature,
@@ -136,5 +141,5 @@ async def trace_llm_call(
         response=resp,
         latency_ms=latency_ms,
         retry_attempt=retry_attempt,
-        error=error or "",
+        error=error,
     )

@@ -137,6 +137,7 @@ async def start_research(request: ResearchRequest) -> ResearchResponse:
         "context_compress_retries": request.context_compress_retries or cfg.context_compress_retries,
         "keep_tool_results": request.keep_tool_results or cfg.keep_tool_results,
         "document_collections": request.document_collections or [],
+        "output_language": request.output_language or cfg.output_language,
     }
 
     task = asyncio.create_task(_run_research(state, run_id))
@@ -187,6 +188,7 @@ async def stream_research(request: ResearchRequest):
                 "context_compress_retries": request.context_compress_retries or cfg.context_compress_retries,
                 "keep_tool_results": request.keep_tool_results or cfg.keep_tool_results,
                 "document_collections": request.document_collections or [],
+                "output_language": request.output_language or cfg.output_language,
             }
 
             graph_task = asyncio.create_task(

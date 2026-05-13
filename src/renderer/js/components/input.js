@@ -2,6 +2,7 @@
 
 let inputDepth = 2;
 let selectedModel = '';
+let outputLanguage = 'zh';
 let _selectedCollections = [];
 
 let _streamController = null;
@@ -21,7 +22,7 @@ async function startResearch() {
   if (_streamController) { _streamController.abort(); _streamController = null; }
 
   _streamController = startResearchStream(
-    query, inputDepth, selectedModel, _selectedCollections,
+    query, inputDepth, selectedModel, _selectedCollections, outputLanguage,
     (evt) => {
       if (evt.run_id && !store.get('currentRunId')) {
         store.set('currentRunId', evt.run_id);
@@ -97,6 +98,14 @@ function initInputPage() {
       document.querySelectorAll('#depth-group .btn-option').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       inputDepth = parseInt(btn.dataset.depth);
+    });
+  });
+
+  document.querySelectorAll('#language-group .btn-option').forEach(btn => {
+    on(btn, 'click', () => {
+      document.querySelectorAll('#language-group .btn-option').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      outputLanguage = btn.dataset.lang;
     });
   });
 

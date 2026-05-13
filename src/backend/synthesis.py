@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from . import search as search_mod
 from .helpers import needs_continuation
 from .llm import chat
-from .prompts import FAILURE_SUMMARY, SYNTHESIS
+from .prompts import DEEPEN_SECTION, FAILURE_SUMMARY, SYNTHESIS
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +22,16 @@ async def _continue_if_truncated(
     *,
     end_marker: str = "<<END_OF_REPORT>>",
     max_rounds: int = 6,
+    cancel_event=None,
 ) -> str:
-    """Continue a truncated synthesis report using explicit continuation prompts.
-
-    Unlike _continue_if_truncated which only sends the tail, this re-sends the
-    original synthesis instruction plus the last segment of the report, asking
-    the model to pick up exactly where it stopped.
-    """
+    """Continue a truncated synthesis report using explicit continuation prompts."""
     if not report or (end_marker and end_marker in report):
         return report
 
     tail_chars = 4000
     for round_idx in range(max_rounds):
+        if cancel_event and cancel_event.is_set():
+            raise asyncio.CancelledError("Research cancelled during synthesis continuation")
         if end_marker and end_marker in report:
             break
         if not needs_continuation(report, end_marker):
@@ -63,14 +61,13 @@ async def _continue_if_truncated(
                 max_tokens=4096,
             )
             if not continuation or len(continuation.strip()) < 30:
-                # Try with longer tail context
                 tail_chars = min(8000, int(tail_chars * 1.5))
                 if tail_chars > len(report):
                     break
                 continue
 
             report = report.rstrip() + "\n\n" + continuation.strip()
-            tail_chars = 4000  # reset for next round
+            tail_chars = 4000
         except Exception as e:
             lower = str(e).lower()
             if any(t in lower for t in ["400", "too long", "max", "context"]):
@@ -137,6 +134,27 @@ def _score_paragraph(paragraph: str, index: int) -> int:
     return score
 
 
+def _deduplicate_consecutive_headings(report: str) -> str:
+    """Remove consecutive duplicate markdown headings from the report.
+
+    LLMs occasionally emit the same section heading twice (e.g.
+    '## Conclusions\n\n## Conclusions'). This strips the duplicate
+    while preserving the first occurrence.
+    """
+    lines = report.split("\n")
+    result: list[str] = []
+    prev_heading: str | None = None
+    for line in lines:
+        m = re.match(r"^(#+ .+)$", line)
+        if m:
+            current = m.group(1).strip()
+            if current == prev_heading:
+                continue
+            prev_heading = current
+        result.append(line)
+    return "\n".join(result)
+
+
 def _trim_reports_by_whole(reports: list[str], max_chars: int) -> str:
     """Trim reports by preserving high-importance paragraphs from each report.
 
@@ -154,6 +172,10 @@ def _trim_reports_by_whole(reports: list[str], max_chars: int) -> str:
         return combined
 
     # Phase 2: compress each report by dropping low-importance paragraphs
+    # Budget allocation: proportional to original report length, with a minimum floor
+    # so short but critical reports are not squeezed to nothing.
+    total_raw = sum(len(r) for r in reports)
+    min_budget = min(4000, max_chars // len(reports))
     compressed: list[str] = []
     for report in reports:
         paragraphs = [p for p in report.split("\n\n") if p.strip()]
@@ -162,12 +184,15 @@ def _trim_reports_by_whole(reports: list[str], max_chars: int) -> str:
             continue
         scored = [(i, p, _score_paragraph(p, i)) for i, p in enumerate(paragraphs)]
         scored.sort(key=lambda x: x[2], reverse=True)
+        # Proportional budget for this report
+        ratio = len(report) / total_raw if total_raw > 0 else 1 / len(reports)
+        report_budget = max(int(max_chars * ratio), min_budget)
         # Greedy rebuild: add paragraphs in importance order until near budget
         kept: list[tuple[int, str]] = []
         current_len = 0
         for idx, para, _ in scored:
             para_len = len(para) + 2  # +2 for \n\n
-            if current_len + para_len <= max_chars // len(reports) + 1000:
+            if current_len + para_len <= report_budget:
                 kept.append((idx, para))
                 current_len += para_len
         # Restore original order
@@ -203,6 +228,9 @@ async def synthesize_report(
     research_plan: str,
     reports: list[str],
     failure_summary: str = "",
+    output_language: str = "zh",
+    cancel_event=None,
+    on_progress=None,
 ) -> str:
     """Multi-pass LLM synthesis with explicit continuation on truncation.
 
@@ -229,7 +257,7 @@ async def synthesize_report(
         _all_subagent_citations.update(_src_pattern.findall(r))
     logger.info("Pre-extracted %d unique citations from sub-agent reports", len(_all_subagent_citations))
 
-    max_input_chars = 60000
+    max_input_chars = 80000
     report_input = _trim_reports_by_whole(valid_reports, max_input_chars)
 
     final_report = ""
@@ -248,21 +276,24 @@ async def synthesize_report(
                     "content": SYNTHESIS.format(
                         user_query=user_query,
                         methodology=methodology,
+                        output_language=output_language,
                         output_structure=output_structure,
                         subagent_reports=report_input,
                         failure_summary=failure_block,
                     ),
                 }],
-                max_tokens=20000,
+                max_tokens=30000,
             )
 
             # If truncated, explicitly continue until marker appears or no more truncation
             result = await _continue_if_truncated(
                 result, user_query, end_marker="<<END_OF_REPORT>>", max_rounds=6,
+                cancel_event=cancel_event,
             )
 
-            # Remove any stray end markers
+            # Remove any stray end markers and deduplicate headings
             result = result.replace("<<END_OF_REPORT>>", "").strip()
+            result = _deduplicate_consecutive_headings(result)
 
             if len(result) > 1000:
                 final_report = result
@@ -303,7 +334,206 @@ async def synthesize_report(
     else:
         logger.info("All %d pre-extracted citations survived synthesis", len(_all_subagent_citations))
 
+    # Deepen thin sections for analytical depth
+    final_report = await _deepen_thin_sections(
+        final_report,
+        valid_reports,
+        user_query,
+        output_language=output_language,
+        cancel_event=cancel_event,
+        on_progress=on_progress,
+    )
+
     return final_report
+
+
+def _strip_heading_markers(text: str) -> str:
+    """Remove markdown heading markers (#) from the start of text."""
+    return re.sub(r'^#+\s*', '', text).strip()
+
+
+async def _deepen_thin_sections(
+    report: str,
+    reports: list[str],
+    user_query: str,
+    output_language: str = "zh",
+    chat_fn=None,
+    cancel_event=None,
+    on_progress=None,
+) -> str:
+    """Identify thin sections and expand them with deeper analysis.
+
+    A top-level section (## heading) is "thin" if its body text is < 800
+    characters OR it contains fewer than 3 inline [src: ...] citations.
+    Only the weakest max_deepen sections are expanded to avoid runaway LLM
+    calls. Each section is deepened AT MOST ONCE.
+    """
+    if chat_fn is None:
+        chat_fn = chat
+
+    # Parse top-level sections only (## headings, not ###)
+    heading_pattern = re.compile(r'^(## [^#].*)$', re.MULTILINE)
+    parts = heading_pattern.split(report)
+    if not parts:
+        return report
+
+    # Identify thin sections at the ## level only
+    thin_sections: list[tuple[int, str, str]] = []  # (idx, heading, body)
+    deepened_headings: set[str] = set()
+    for i, part in enumerate(parts):
+        if part.startswith('## '):
+            heading = part.strip()
+            body = parts[i + 1] if i + 1 < len(parts) else ""
+            body_text = body.strip()
+            if not body_text:
+                continue
+            normalized_heading = _strip_heading_markers(heading)
+            if normalized_heading in deepened_headings:
+                continue
+            char_count = len(body_text)
+            citation_count = len(re.findall(r'\[src:\s*[^\]]+\]', body_text))
+            # Threshold: < 800 chars OR < 3 citations
+            if char_count < 800 or citation_count < 3:
+                thin_sections.append((i, heading, body_text))
+                deepened_headings.add(normalized_heading)
+                logger.info(
+                    "Thin section detected: %s (%d chars, %d citations)",
+                    heading, char_count, citation_count,
+                )
+
+    # Cap deepening to the weakest sections to avoid runaway LLM calls
+    max_deepen = 5
+    total_thin = len(thin_sections)
+    if total_thin > max_deepen:
+        # Sort by (citation_count asc, char_count asc) — weakest first
+        thin_sections.sort(key=lambda x: (
+            len(re.findall(r'\[src:\s*[^\]]+\]', x[2])),
+            len(x[2]),
+        ))
+        thin_sections = thin_sections[:max_deepen]
+        logger.info(
+            "Limiting deepening to %d weakest of %d thin sections",
+            max_deepen, total_thin,
+        )
+
+    if not thin_sections:
+        logger.info("No thin sections detected; skipping deepening.")
+        return report
+
+    # Build a searchable evidence pool from all sub-agent reports
+    evidence_pool = "\n\n---\n\n".join(reports)
+
+    # Expand each thin section sequentially (to stay within context limits)
+    total = len(thin_sections)
+    for done, (_, heading, body_text) in enumerate(thin_sections, start=1):
+        if cancel_event and cancel_event.is_set():
+            raise asyncio.CancelledError("Research cancelled during synthesis deepening")
+        try:
+            # Extract relevant evidence by simple keyword matching
+            keywords = _extract_keywords(heading)
+            relevant_evidence = _extract_relevant_evidence(evidence_pool, keywords, max_chars=12000)
+
+            logger.info("Deepening section: %s", heading)
+            expanded = await chat_fn(
+                role="coordinator",
+                messages=[{
+                    "role": "system",
+                    "content": DEEPEN_SECTION.format(
+                        user_query=user_query,
+                        section_title=heading,
+                        current_length=len(body_text),
+                        current_content=body_text,
+                        relevant_evidence=relevant_evidence,
+                        output_language=output_language,
+                    ),
+                }],
+                max_tokens=8000,
+            )
+            if on_progress:
+                await on_progress(done, total)
+            expanded = expanded.strip().replace("<<END_OF_REPORT>>", "").strip()
+            if len(expanded) > len(body_text) * 1.3:
+                # Determine whether expanded already contains the heading
+                expanded_first_line_raw = next(
+                    (line for line in expanded.split("\n") if line.strip()), ""
+                )
+                expanded_first_line = _strip_heading_markers(expanded_first_line_raw)
+                current_heading_text = _strip_heading_markers(heading)
+                if expanded_first_line == current_heading_text:
+                    new_section = expanded
+                else:
+                    new_section = heading + "\n\n" + expanded
+
+                # Replace the entire section (heading through body) to avoid
+                # leaving the original heading behind or matching the wrong boundary.
+                heading_pos = report.find(heading)
+                if heading_pos == -1:
+                    logger.warning(
+                        "Could not find section %s in report for replacement", heading
+                    )
+                    continue
+                next_heading_match = heading_pattern.search(
+                    report, heading_pos + len(heading)
+                )
+                section_end = next_heading_match.start() if next_heading_match else len(report)
+                report = report[:heading_pos] + new_section.rstrip() + "\n\n" + report[section_end:]
+                logger.info(
+                    "Section %s deepened: %d -> %d chars",
+                    heading, len(body_text), len(expanded),
+                )
+            else:
+                logger.warning(
+                    "Section %s expansion too small (%d -> %d chars), keeping original",
+                    heading, len(body_text), len(expanded),
+                )
+        except Exception as e:
+            logger.warning("Deepening failed for section %s: %s", heading, e)
+            continue
+
+    # Deepening may introduce duplicate headings (e.g. LLM re-emits the
+    # section heading inside expanded content). Clean them up before returning.
+    return _deduplicate_consecutive_headings(report)
+
+
+def _extract_keywords(heading: str) -> list[str]:
+    """Extract meaningful keywords from a section heading for evidence matching."""
+    # Strip markdown heading markers and common stop words
+    text = re.sub(r'^#+\s*', '', heading)
+    # Remove punctuation and split
+    words = re.findall(r'[一-鿿\w]+', text)
+    # Filter out very short words and common stop words
+    stop_words = {"the", "and", "of", "in", "to", "a", "for", "on", "with", "as", "is", "are", "的", "与", "及", "在", "为"}
+    keywords = [w for w in words if len(w) > 1 and w.lower() not in stop_words]
+    return keywords[:8]
+
+
+def _extract_relevant_evidence(evidence_pool: str, keywords: list[str], max_chars: int = 12000) -> str:
+    """Extract paragraphs from evidence pool that contain at least one keyword."""
+    paragraphs = [p for p in evidence_pool.split("\n\n") if p.strip()]
+    scored: list[tuple[str, int]] = []
+    for para in paragraphs:
+        score = sum(1 for kw in keywords if kw.lower() in para.lower())
+        # Boost paragraphs with citations and data
+        if "[src:" in para:
+            score += 2
+        if re.search(r'\b\d{4}\b|\b\d+\.\d+', para):
+            score += 1
+        if score > 0:
+            scored.append((para, score))
+
+    # Sort by relevance score descending
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Greedy select top paragraphs up to max_chars
+    result_parts: list[str] = []
+    current_len = 0
+    for para, _ in scored:
+        if current_len + len(para) + 2 > max_chars:
+            break
+        result_parts.append(para)
+        current_len += len(para) + 2
+
+    return "\n\n".join(result_parts) if result_parts else "(No highly relevant evidence found)"
 
 
 def _normalize_url(url: str) -> str:
@@ -329,7 +559,7 @@ def _domain_from_url(url: str) -> str:
 
 
 async def _verify_citation_urls(urls: list[str]) -> dict[str, bool]:
-    """Concurrently check which URLs are accessible via trafilatura.
+    """Concurrently check which URLs are accessible via Crawl4AI.
 
     Returns {url: True/False} — True if content was successfully extracted.
     """
@@ -346,8 +576,8 @@ async def _verify_citation_urls(urls: list[str]) -> dict[str, bool]:
                 return url, True
             try:
                 text = await asyncio.wait_for(
-                    asyncio.to_thread(search_mod.extract, url),
-                    timeout=10,
+                    search_mod.extract_async(url),
+                    timeout=15,
                 )
                 return url, text is not None
             except Exception:

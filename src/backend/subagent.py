@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from .config import get_config
@@ -243,7 +244,10 @@ async def run_subagent(
         query_cache = {}
 
     # Build tools bound to shared query_cache
-    tools = build_research_tools(query_cache=query_cache)
+    tools = build_research_tools(
+        query_cache=query_cache,
+        document_collections=document_collections,
+    )
 
     # Override submit_report tool to force-inject correct subtask ID/title.
     # The LLM sometimes omits the id when constructing the subtask dict itself,
@@ -318,12 +322,15 @@ async def run_subagent(
         "has_gap_instruction": gap_instruction is not None,
     }, level="debug")
 
+    # Decouple max_steps from search budget: give enough room for
+    # search → evaluate → fetch → synthesize → write → submit flow.
+    max_steps = min(max(tool_budget * 2, 12), 18)
     result = await run_react_agent(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         tools=tools,
         chat_fn=chat,
-        max_steps=min(tool_budget, 18),
+        max_steps=max_steps,
         temperature=0.3,
         subtask_id=sid,
     )

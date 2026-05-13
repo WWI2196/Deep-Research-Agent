@@ -39,6 +39,7 @@ class AppConfig:
     source_type_quotas: dict[str, int] = field(default_factory=lambda: {"document": 3, "web": 8})
     min_source_per_type: dict[str, int] = field(default_factory=lambda: {"document": 1, "web": 2})
     log_level: str = "info"
+    output_language: str = "zh"
     roles: dict[str, RoleConfig] = field(default_factory=dict)
     agentic_rag_enabled: bool = True
 
@@ -60,6 +61,7 @@ class AppConfig:
             "source_type_quotas": self.source_type_quotas,
             "min_source_per_type": self.min_source_per_type,
             "log_level": self.log_level,
+            "output_language": self.output_language,
             "agentic_rag_enabled": self.agentic_rag_enabled,
             "roles": {
                 name: {"model": rc.model}
@@ -169,6 +171,11 @@ def load_config() -> AppConfig:
             or research_yaml.get("log_level", "")
             or "info"
         ).lower(),
+        output_language=(
+            os.getenv("OUTPUT_LANGUAGE")
+            or research_yaml.get("output_language", "")
+            or "zh"
+        ).lower(),
         agentic_rag_enabled=(
             os.getenv("AGENTIC_RAG_ENABLED", "").lower() in ("1", "true", "yes")
             or research_yaml.get("agentic_rag_enabled", False) is True
@@ -210,6 +217,7 @@ def save_config(cfg: AppConfig) -> None:
         "source_type_quotas": cfg.source_type_quotas,
         "min_source_per_type": cfg.min_source_per_type,
         "log_level": cfg.log_level,
+        "output_language": cfg.output_language,
         "agentic_rag_enabled": cfg.agentic_rag_enabled,
     }
 

@@ -21,21 +21,23 @@ async function apiPost(path, body) {
   return res.json();
 }
 
-async function startResearchApi(query, depth, model, documentCollections) {
+async function startResearchApi(query, depth, model, documentCollections, outputLanguage) {
   return apiPost('/api/research', {
     query,
     max_iterations: depth,
     model: model || undefined,
     document_collections: documentCollections || undefined,
+    output_language: outputLanguage || undefined,
   });
 }
 
-function startResearchStream(query, depth, model, documentCollections, onEvent, onError, onDone) {
+function startResearchStream(query, depth, model, documentCollections, outputLanguage, onEvent, onError, onDone) {
   const body = JSON.stringify({
     query,
     max_iterations: depth,
     model: model || undefined,
     document_collections: documentCollections || undefined,
+    output_language: outputLanguage || undefined,
   });
 
   // Native EventSource doesn't support POST body; use fetch + ReadableStream instead

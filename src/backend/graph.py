@@ -1,5 +1,6 @@
 """LangGraph state graph for the research pipeline — all async."""
 
+import asyncio
 import json
 import logging
 import uuid
@@ -22,7 +23,7 @@ from .planning import generate_research_plan, split_into_subtasks
 from .prompts import REFLECTION
 from .subagent import run_subagent, run_subagents_parallel
 from .synthesis import add_citations, synthesize_report
-from .tracing import current_run_id, trace
+from .tracing import current_phase, current_run_id, trace
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         await on_event(evt)
 
     async def _init_node(s: ResearchState) -> ResearchState:
+        current_phase.set("init")
         await _check_cancelled()
         nonlocal completed_weight
         s["run_id"] = s.get("run_id") or str(uuid.uuid4())
@@ -74,6 +76,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         s["document_collections"] = s.get("document_collections") or []
         s["gap_instructions"] = []
         s["tool_call_history"] = []
+        s["_subtask_report_map"] = {}
 
         await trace("init", "node_enter", "Entering init node", {"run_id": s["run_id"], "query": s["user_query"]})
         await _emit({"type": "phase-update", "phase": "init",
@@ -87,6 +90,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         return s
 
     async def _plan_node(s: ResearchState) -> ResearchState:
+        current_phase.set("plan")
         nonlocal completed_weight
         await _check_cancelled()
         await trace("plan", "node_enter", "Entering plan node")
@@ -113,6 +117,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         return s
 
     async def _split_node(s: ResearchState) -> ResearchState:
+        current_phase.set("split")
         nonlocal completed_weight
         await _check_cancelled()
         await trace("split", "node_enter", "Entering split node")
@@ -152,6 +157,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         return s
 
     async def _subagents_node(s: ResearchState) -> ResearchState:
+        current_phase.set("subagents")
         nonlocal completed_weight
         await _check_cancelled()
         iteration = s.get("iteration_count", 0)
@@ -195,10 +201,16 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
             if "tool_calls" in r:
                 s.setdefault("tool_call_history", []).extend(r["tool_calls"])
 
-        existing_reports = s.get("subagent_reports", [])
         existing_sources = s.get("sources", [])
-        s["subagent_reports"] = existing_reports + results["reports"]
-        new_completed = [r["subtask_id"] for r in results.get("raw", [])]
+        # When reflection re-runs a subtask, replace its old report rather than
+        # appending a duplicate. Use subtask_id as the precise key.
+        new_raw = results.get("raw", [])
+        report_map = s.get("_subtask_report_map", {})
+        for r in new_raw:
+            report_map[r["subtask_id"]] = r["report"]
+        s["_subtask_report_map"] = report_map
+        s["subagent_reports"] = list(report_map.values())
+        new_completed = [r["subtask_id"] for r in new_raw]
         s["completed_subtasks"] = list(completed | set(new_completed))
 
         all_sources = existing_sources + results["sources"]
@@ -253,14 +265,24 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
                 )
 
         await trace("subagents", "node_exit", f"Subagents complete", {"success": results.get("success_count", 0), "total": results.get("total_count", 0), "new_sources": len(results.get("sources", []))})
-        pct = _progress(completed_weight, PHASE_WEIGHTS["subagents"])
+        # Split subagents weight across possible iterations to avoid jumping to 99%
+        max_iter = max(s.get("max_iterations", 2), 1)
+        subagent_weight = PHASE_WEIGHTS["subagents"] / max_iter
+        pct = _progress(completed_weight, subagent_weight)
         await _emit({"type": "progress", "phase": "subagents", "percent": pct})
-        completed_weight += PHASE_WEIGHTS["subagents"]
+        completed_weight += subagent_weight
 
+        await update_run_status(
+            s["run_id"], "running",
+            total_sources=len(s.get("sources", [])),
+            total_reports=len(s.get("subagent_reports", [])),
+            iterations=s.get("iteration_count", 0),
+        )
         await persist_checkpoint(s["run_id"], f"subagents_{iteration}", s)
         return s
 
     async def _reflection_node(s: ResearchState) -> ResearchState:
+        current_phase.set("reflection")
         nonlocal completed_weight
         await _check_cancelled()
         iteration = s.get("iteration_count", 0)
@@ -435,10 +457,17 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         completed_weight += PHASE_WEIGHTS["reflection"]
         await trace("reflection", "node_exit", "Reflection complete")
 
+        await update_run_status(
+            s["run_id"], "running",
+            total_sources=len(s.get("sources", [])),
+            total_reports=len(s.get("subagent_reports", [])),
+            iterations=s.get("iteration_count", 0),
+        )
         await persist_checkpoint(s["run_id"], "reflection", s)
         return s
 
     async def _synthesize_node(s: ResearchState) -> ResearchState:
+        current_phase.set("synthesize")
         nonlocal completed_weight
         await _check_cancelled()
         report_count = len(s.get("subagent_reports", []))
@@ -452,9 +481,16 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         retry_count = s.get("synthesis_retry_count", 0)
         max_retries = s.get("context_compress_retries", cfg.context_compress_retries)
 
+        async def _synth_progress(done: int, total: int) -> None:
+            await _emit({"type": "phase-update", "phase": "synthesize",
+                   "message": f"Synthesizing reports... (deepening {done}/{total})"})
+
         s["report"] = await synthesize_report(
             s["user_query"], plan_text, s["subagent_reports"],
             failure_summary=failure_summary,
+            output_language=s.get("output_language", "zh"),
+            cancel_event=cancel_event,
+            on_progress=_synth_progress,
         )
 
         # Retry if still truncated after continuation rounds
@@ -474,6 +510,9 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
             s["report"] = await synthesize_report(
                 s["user_query"], plan_text, s["subagent_reports"],
                 failure_summary=summary,
+                output_language=s.get("output_language", "zh"),
+                cancel_event=cancel_event,
+                on_progress=_synth_progress,
             )
 
         await _emit({"type": "report-draft", "content": s["report"][:1000],
@@ -488,6 +527,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         return s
 
     async def _citation_node(s: ResearchState) -> ResearchState:
+        current_phase.set("cite")
         nonlocal completed_weight
         await _check_cancelled()
         source_count = len(s.get("sources", []))

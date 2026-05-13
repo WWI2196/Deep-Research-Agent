@@ -82,8 +82,10 @@ init → plan → split → subagents → reflection → synthesize → cite →
 - **split**: Break into 3–8 parallel subtasks
 - **subagents**: Each subagent searches the web + your document library, evaluates sources, extracts content, and writes a cited report
 - **reflection**: Quantitative per-dimension scoring; gaps trigger targeted re-search (up to max_iterations)
-- **synthesize**: Single-pass LLM synthesis with automatic truncation recovery
+- **synthesize**: Single-pass LLM synthesis with automatic truncation recovery and thin-section deepening
 - **cite**: Rule-based citation numbering + concurrent URL liveness verification
+
+Subtask reports are deduplicated by `subtask_id` when reflection triggers re-runs, preventing duplicate content from reaching the synthesis stage.
 
 ## Document Library (RAG)
 
@@ -93,12 +95,6 @@ Upload PDF, DOCX, TXT, MD, or HTML files into collections. The system uses:
 - **RRF fusion** to combine both
 
 Documents are parsed, chunked, embedded, and indexed asynchronously. During research, your document library is searched in parallel with web search.
-
-## Testing
-
-```bash
-uv run pytest tests/ -v    # 218 backend tests
-```
 
 ## License
 

@@ -450,6 +450,7 @@ async def submit_report_tool(
 
 def build_research_tools(
     query_cache: dict[str, dict[str, Any]] | None = None,
+    document_collections: list[str] | None = None,
 ) -> list[Tool]:
     """Build tool instances bound to shared query_cache."""
     if query_cache is None:
@@ -458,7 +459,7 @@ def build_research_tools(
     async def _searxng_search_wrapped(**kwargs: Any) -> dict[str, Any]:
         return await searxng_search_tool(query_cache=query_cache, **kwargs)
 
-    return [
+    tools: list[Tool] = [
         Tool(
             name="searxng_search",
             description=(
@@ -469,16 +470,21 @@ def build_research_tools(
             params_schema={"query": "str", "limit": "int (optional, default 8)"},
             fn=_searxng_search_wrapped,
         ),
-        Tool(
-            name="document_hybrid_search",
-            description=(
-                "Search private document collections using hybrid retrieval "
-                "(Chroma vector + bm25s keyword + RRF fusion). Returns document chunks "
-                "with full text already available. Highly trusted source."
-            ),
-            params_schema={"query": "str", "collection_ids": "list[str]", "top_k": "int (optional, default 12)"},
-            fn=document_hybrid_search_tool,
-        ),
+    ]
+    if document_collections:
+        tools.append(
+            Tool(
+                name="document_hybrid_search",
+                description=(
+                    "Search private document collections using hybrid retrieval "
+                    "(Chroma vector + bm25s keyword + RRF fusion). Returns document chunks "
+                    "with full text already available. Highly trusted source."
+                ),
+                params_schema={"query": "str", "collection_ids": "list[str]", "top_k": "int (optional, default 12)"},
+                fn=document_hybrid_search_tool,
+            )
+        )
+    tools.extend([
         Tool(
             name="evaluate_sources",
             description=(
@@ -527,4 +533,5 @@ def build_research_tools(
             params_schema={"evidence": "list[dict]", "subtask": "dict", "user_query": "str"},
             fn=submit_report_tool,
         ),
-    ]
+    ])
+    return tools
