@@ -93,6 +93,7 @@ class ResearchState(TypedDict, total=False):
     query_cache: dict[str, list[dict[str, Any]]]
     document_collections: list[str]
     output_language: str
+    bench_format: bool
     # Agentic RAG negotiation fields
     gap_instructions: list[dict[str, Any]]
     tool_call_history: list[dict[str, Any]]

@@ -618,8 +618,13 @@ def _strip_existing_ref_sections(report: str) -> str:
 
 async def add_citations(
     report: str, sources: list[dict[str, Any]],
+    bench_format: bool = False,
 ) -> tuple[str, dict[str, bool]]:
     """Rule-based citation: parse [src: <url>] markers, number them, generate References.
+
+    Args:
+        bench_format: If True, use `[n]` instead of `[^n]` for compatibility with
+            DeepResearch-Bench FACT evaluation (which expects `[15]` style citations).
 
     Returns (cited_report, verification_map) where verification_map is {url: accessible_bool}.
     """
@@ -646,7 +651,9 @@ async def add_citations(
         raw = match.group(1).strip()
         clean = normalized_map.get(raw, _normalize_url(raw))
         idx = seen.get(clean)
-        return f"[^{idx}]" if idx else match.group(0)
+        if not idx:
+            return match.group(0)
+        return f"[{idx}]" if bench_format else f"[^{idx}]"
 
     cited_report = src_pattern.sub(_replace_src, report)
 

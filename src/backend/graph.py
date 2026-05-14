@@ -74,6 +74,8 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         s["keep_tool_results"] = s.get("keep_tool_results") or cfg.keep_tool_results
         s["query_cache"] = {}
         s["document_collections"] = s.get("document_collections") or []
+        s["output_language"] = s.get("output_language", "zh")
+        s["bench_format"] = s.get("bench_format", False)
         s["gap_instructions"] = []
         s["tool_call_history"] = []
         s["_subtask_report_map"] = {}
@@ -541,6 +543,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         else:
             s["cited_report"], verification = await add_citations(
                 s["report"], s.get("sources", []),
+                bench_format=s.get("bench_format", False),
             )
         total_urls = len(verification)
         accessible = sum(1 for v in verification.values() if v)
