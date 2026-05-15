@@ -223,6 +223,90 @@ def _trim_reports_by_whole(reports: list[str], max_chars: int) -> str:
     return reports[0][:max_chars] if reports else ""
 
 
+async def _verify_task_compliance(
+    report: str,
+    requirements: dict[str, Any],
+    user_query: str,
+    output_language: str = "zh",
+    chat_fn=None,
+) -> str:
+    """Verify and augment report for task compliance.
+    
+    Uses LLM to check if the report satisfies all task requirements.
+    If requirements are missing, generates supplementary content.
+    """
+    if chat_fn is None:
+        chat_fn = chat
+    
+    if not requirements:
+        return report
+    
+    # Build requirements summary
+    req_summary = []
+    if requirements.get("core_objectives"):
+        req_summary.append(f"Core Objectives: {', '.join(requirements['core_objectives'])}")
+    if requirements.get("explicit_requirements"):
+        req_summary.append(f"Explicit Requirements: {', '.join(requirements['explicit_requirements'])}")
+    if requirements.get("scope_constraints"):
+        constraints = requirements["scope_constraints"]
+        constraint_strs = [f"{k}: {v}" for k, v in constraints.items() if v]
+        if constraint_strs:
+            req_summary.append(f"Scope Constraints: {', '.join(constraint_strs)}")
+    if requirements.get("sub_questions"):
+        req_summary.append(f"Sub-questions: {', '.join(requirements['sub_questions'])}")
+    
+    if not req_summary:
+        return report
+    
+    prompt = f"""\
+You are a task compliance auditor. Review this research report against the original task requirements.
+
+Original task: {user_query}
+
+Extracted requirements:
+{chr(10).join(req_summary)}
+
+Report excerpt (first 3000 chars):
+{report[:3000]}
+
+Task:
+1. Check if the report FULLY satisfies each requirement
+2. Identify any MISSING requirements or incomplete responses
+3. If requirements are missing, generate a brief supplementary section (300-500 words) that addresses them
+4. Focus especially on:
+   - Does it directly answer the user's primary question?
+   - Are comparisons/evaluations/recommendations/predictions explicit and clear?
+   - Are all scope constraints respected?
+   - Are all sub-questions answered?
+
+If the report is FULLY COMPLIANT, respond with exactly: COMPLIANT
+If there are gaps, respond with ONLY the supplementary content (no preamble, no "Supplementary section:" header)."""
+
+    try:
+        response = await chat_fn(
+            role="coordinator",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=1500,
+        )
+        response = response.strip()
+        
+        if "COMPLIANT" in response.upper() and len(response) < 50:
+            logger.info("Task compliance check passed")
+            return report
+        
+        if len(response) > 100:
+            logger.info("Task compliance gaps found, appending supplementary content (%d chars)", len(response))
+            # Append supplementary section
+            report += f"\n\n## 补充说明\n\n{response}\n"
+            return report
+        
+        return report
+    except Exception as e:
+        logger.warning("Task compliance verification failed: %s", e)
+        return report
+
+
 async def synthesize_report(
     user_query: str,
     research_plan: str,
@@ -231,6 +315,7 @@ async def synthesize_report(
     output_language: str = "zh",
     cancel_event=None,
     on_progress=None,
+    requirements: dict[str, Any] | None = None,
 ) -> str:
     """Multi-pass LLM synthesis with explicit continuation on truncation.
 
@@ -344,6 +429,15 @@ async def synthesize_report(
         on_progress=on_progress,
     )
 
+    # Verify task compliance and augment if needed
+    if requirements:
+        final_report = await _verify_task_compliance(
+            final_report,
+            requirements,
+            user_query,
+            output_language=output_language,
+        )
+
     return final_report
 
 
@@ -423,16 +517,16 @@ async def _deepen_thin_sections(
     # Build a searchable evidence pool from all sub-agent reports
     evidence_pool = "\n\n---\n\n".join(reports)
 
-    # Expand each thin section sequentially (to stay within context limits)
+    # Expand all thin sections in parallel
     total = len(thin_sections)
-    for done, (_, heading, body_text) in enumerate(thin_sections, start=1):
-        if cancel_event and cancel_event.is_set():
-            raise asyncio.CancelledError("Research cancelled during synthesis deepening")
-        try:
-            # Extract relevant evidence by simple keyword matching
+    _deepen_semaphore = asyncio.Semaphore(3)  # cap concurrent LLM calls
+
+    async def _expand_section(heading: str, body_text: str) -> str | None:
+        async with _deepen_semaphore:
+            if cancel_event and cancel_event.is_set():
+                raise asyncio.CancelledError("Research cancelled during synthesis deepening")
             keywords = _extract_keywords(heading)
             relevant_evidence = _extract_relevant_evidence(evidence_pool, keywords, max_chars=12000)
-
             logger.info("Deepening section: %s", heading)
             expanded = await chat_fn(
                 role="coordinator",
@@ -449,46 +543,55 @@ async def _deepen_thin_sections(
                 }],
                 max_tokens=8000,
             )
-            if on_progress:
-                await on_progress(done, total)
             expanded = expanded.strip().replace("<<END_OF_REPORT>>", "").strip()
             if len(expanded) > len(body_text) * 1.3:
-                # Determine whether expanded already contains the heading
-                expanded_first_line_raw = next(
-                    (line for line in expanded.split("\n") if line.strip()), ""
-                )
-                expanded_first_line = _strip_heading_markers(expanded_first_line_raw)
-                current_heading_text = _strip_heading_markers(heading)
-                if expanded_first_line == current_heading_text:
-                    new_section = expanded
-                else:
-                    new_section = heading + "\n\n" + expanded
+                return expanded
+            logger.warning(
+                "Section %s expansion too small (%d -> %d chars), keeping original",
+                heading, len(body_text), len(expanded),
+            )
+            return None
 
-                # Replace the entire section (heading through body) to avoid
-                # leaving the original heading behind or matching the wrong boundary.
-                heading_pos = report.find(heading)
-                if heading_pos == -1:
-                    logger.warning(
-                        "Could not find section %s in report for replacement", heading
-                    )
-                    continue
-                next_heading_match = heading_pattern.search(
-                    report, heading_pos + len(heading)
-                )
-                section_end = next_heading_match.start() if next_heading_match else len(report)
-                report = report[:heading_pos] + new_section.rstrip() + "\n\n" + report[section_end:]
-                logger.info(
-                    "Section %s deepened: %d -> %d chars",
-                    heading, len(body_text), len(expanded),
-                )
-            else:
-                logger.warning(
-                    "Section %s expansion too small (%d -> %d chars), keeping original",
-                    heading, len(body_text), len(expanded),
-                )
-        except Exception as e:
-            logger.warning("Deepening failed for section %s: %s", heading, e)
+    expansion_coros = [
+        _expand_section(heading, body_text)
+        for _, heading, body_text in thin_sections
+    ]
+    expansion_results = await asyncio.gather(*expansion_coros, return_exceptions=True)
+
+    if on_progress:
+        await on_progress(total, total)
+
+    # Apply expansions in reverse position order to avoid offset shifts
+    for (idx, heading, body_text), expanded in reversed(list(zip(thin_sections, expansion_results))):
+        if isinstance(expanded, Exception):
+            logger.warning("Deepening failed for section %s: %s", heading, expanded)
             continue
+        if expanded is None:
+            continue
+
+        expanded_first_line_raw = next(
+            (line for line in expanded.split("\n") if line.strip()), ""
+        )
+        expanded_first_line = _strip_heading_markers(expanded_first_line_raw)
+        current_heading_text = _strip_heading_markers(heading)
+        if expanded_first_line == current_heading_text:
+            new_section = expanded
+        else:
+            new_section = heading + "\n\n" + expanded
+
+        heading_pos = report.find(heading)
+        if heading_pos == -1:
+            logger.warning("Could not find section %s in report for replacement", heading)
+            continue
+        next_heading_match = heading_pattern.search(
+            report, heading_pos + len(heading)
+        )
+        section_end = next_heading_match.start() if next_heading_match else len(report)
+        report = report[:heading_pos] + new_section.rstrip() + "\n\n" + report[section_end:]
+        logger.info(
+            "Section %s deepened: %d -> %d chars",
+            heading, len(body_text), len(expanded),
+        )
 
     # Deepening may introduce duplicate headings (e.g. LLM re-emits the
     # section heading inside expanded content). Clean them up before returning.

@@ -94,6 +94,8 @@ class ResearchState(TypedDict, total=False):
     document_collections: list[str]
     output_language: str
     bench_format: bool
+    # Task requirements extracted from user query
+    requirements: dict[str, Any]
     # Agentic RAG negotiation fields
     gap_instructions: list[dict[str, Any]]
     tool_call_history: list[dict[str, Any]]

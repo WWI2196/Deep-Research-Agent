@@ -87,8 +87,10 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         completed_weight += PHASE_WEIGHTS["init"]
         await trace("init", "node_exit", "Init complete", {"model": cfg.default_model})
 
-        await persist_run(s["run_id"], s["user_query"], cfg.base_url, cfg.default_model)
-        await persist_checkpoint(s["run_id"], "init", s)
+        await asyncio.gather(
+            persist_run(s["run_id"], s["user_query"], cfg.base_url, cfg.default_model),
+            persist_checkpoint(s["run_id"], "init", s),
+        )
         return s
 
     async def _plan_node(s: ResearchState) -> ResearchState:
@@ -103,6 +105,17 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         )
         s["research_plan"] = plan
         s["plan_methodology"] = plan.get("methodology", "")
+        # Extract and save requirements from the plan
+        requirements = plan.get("requirements", {})
+        if not requirements:
+            # Fallback: extract basic requirements from user query
+            requirements = {
+                "core_objectives": ["Research the given topic thoroughly"],
+                "explicit_requirements": [],
+                "scope_constraints": {"region": "", "time": "", "target": ""},
+                "sub_questions": [s["user_query"]],
+            }
+        s["requirements"] = requirements
         dims = plan.get("dimensions", [])
         preview = json.dumps([d.get("name", "") for d in dims], ensure_ascii=False)
         await _emit({"type": "plan-generated",
@@ -242,7 +255,8 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         s["sources"] = unique
         s["iteration_count"] = iteration + 1
 
-        # Emit per-subagent events & persist
+        # Emit per-subagent events (sequential for SSE ordering), then persist in parallel
+        persist_tasks = []
         for item in results.get("raw", []):
             await _emit({"type": "subagent-complete",
                    "subtask_id": item["subtask_id"],
@@ -251,20 +265,20 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
                    "sources_count": len(item.get("sources", [])),
                    "evidence_count": item.get("evidence_count", 0)})
 
-            await persist_subagent_report(
+            persist_tasks.append(persist_subagent_report(
                 s["run_id"], item["subtask_id"], item.get("report", ""),
                 sources_count=len(item.get("sources", [])),
                 evidence_count=item.get("evidence_count", 0),
-            )
-
+            ))
             for src in item.get("sources", []):
-                await persist_source(
+                persist_tasks.append(persist_source(
                     s["run_id"], src.get("url", ""),
                     title=src.get("title", ""),
                     quality_score=src.get("quality_score", 0),
                     domain=src.get("domain", ""),
                     subtask_id=item["subtask_id"],
-                )
+                ))
+        await asyncio.gather(*persist_tasks)
 
         await trace("subagents", "node_exit", f"Subagents complete", {"success": results.get("success_count", 0), "total": results.get("total_count", 0), "new_sources": len(results.get("sources", []))})
         # Split subagents weight across possible iterations to avoid jumping to 99%
@@ -274,13 +288,15 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         await _emit({"type": "progress", "phase": "subagents", "percent": pct})
         completed_weight += subagent_weight
 
-        await update_run_status(
-            s["run_id"], "running",
-            total_sources=len(s.get("sources", [])),
-            total_reports=len(s.get("subagent_reports", [])),
-            iterations=s.get("iteration_count", 0),
+        await asyncio.gather(
+            update_run_status(
+                s["run_id"], "running",
+                total_sources=len(s.get("sources", [])),
+                total_reports=len(s.get("subagent_reports", [])),
+                iterations=s.get("iteration_count", 0),
+            ),
+            persist_checkpoint(s["run_id"], f"subagents_{iteration}", s),
         )
-        await persist_checkpoint(s["run_id"], f"subagents_{iteration}", s)
         return s
 
     async def _reflection_node(s: ResearchState) -> ResearchState:
@@ -344,6 +360,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
                         methodology=s.get("plan_methodology", ""),
                         past_subtasks=past,
                         subagent_reports=truncated,
+                        quality_threshold=s.get("quality_threshold", 0.65),
                     ) + "\n\nReturn ONLY valid JSON.",
                 }],
             )
@@ -459,13 +476,15 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         completed_weight += PHASE_WEIGHTS["reflection"]
         await trace("reflection", "node_exit", "Reflection complete")
 
-        await update_run_status(
-            s["run_id"], "running",
-            total_sources=len(s.get("sources", [])),
-            total_reports=len(s.get("subagent_reports", [])),
-            iterations=s.get("iteration_count", 0),
+        await asyncio.gather(
+            update_run_status(
+                s["run_id"], "running",
+                total_sources=len(s.get("sources", [])),
+                total_reports=len(s.get("subagent_reports", [])),
+                iterations=s.get("iteration_count", 0),
+            ),
+            persist_checkpoint(s["run_id"], "reflection", s),
         )
-        await persist_checkpoint(s["run_id"], "reflection", s)
         return s
 
     async def _synthesize_node(s: ResearchState) -> ResearchState:
@@ -493,6 +512,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
             output_language=s.get("output_language", "zh"),
             cancel_event=cancel_event,
             on_progress=_synth_progress,
+            requirements=s.get("requirements"),
         )
 
         # Retry if still truncated after continuation rounds
@@ -515,6 +535,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
                 output_language=s.get("output_language", "zh"),
                 cancel_event=cancel_event,
                 on_progress=_synth_progress,
+                requirements=s.get("requirements"),
             )
 
         await _emit({"type": "report-draft", "content": s["report"][:1000],

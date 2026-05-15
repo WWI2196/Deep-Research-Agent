@@ -100,8 +100,6 @@ def _rrf_fusion(
     return scores
 
 
-# ── DocumentStore ───────────────────────────────────────────────
-
 class DocumentStore:
     """Manages collections of documents with hybrid (vector + BM25) retrieval."""
 
@@ -156,26 +154,19 @@ class DocumentStore:
         return {"id": collection_id, "name": name, "description": description, "doc_count": 0}
 
     async def delete_collection(self, collection_id: str) -> bool:
-        try:
-            await asyncio.to_thread(
-                self._chroma_client.delete_collection, name=collection_id
-            )
-        except Exception as exc:
-            logger.warning("Chroma delete_collection %s: %s", collection_id, exc)
+        import shutil
 
-        # Remove bm25 index
+        # All cleanup operations are independent — run in parallel
         bm25_path = self._bm25_dir / collection_id
-        if bm25_path.exists():
-            import shutil
-            await asyncio.to_thread(shutil.rmtree, bm25_path, ignore_errors=True)
-
-        # Remove doc files
         doc_dir = self._docs_dir / collection_id
-        if doc_dir.exists():
-            import shutil
-            await asyncio.to_thread(shutil.rmtree, doc_dir, ignore_errors=True)
 
-        await delete_collection_db(collection_id)
+        cleanup_tasks = [
+            asyncio.to_thread(self._chroma_client.delete_collection, name=collection_id),
+            asyncio.to_thread(shutil.rmtree, bm25_path, ignore_errors=True) if bm25_path.exists() else asyncio.sleep(0),
+            asyncio.to_thread(shutil.rmtree, doc_dir, ignore_errors=True) if doc_dir.exists() else asyncio.sleep(0),
+            delete_collection_db(collection_id),
+        ]
+        await asyncio.gather(*cleanup_tasks, return_exceptions=True)
         logger.info("Deleted collection %s", collection_id)
         return True
 
@@ -537,14 +528,19 @@ class DocumentStore:
         if not collection_ids:
             return []
 
-        all_results: list[dict[str, Any]] = []
+        # Search all collections in parallel
+        tasks = [
+            self._query_single_collection(cid, query_text, top_k, category_filter)
+            for cid in collection_ids
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        for cid in collection_ids:
-            try:
-                fused = await self._query_single_collection(cid, query_text, top_k, category_filter)
-                all_results.extend(fused)
-            except Exception as exc:
-                logger.warning("Query collection %s failed: %s", cid, exc)
+        all_results: list[dict[str, Any]] = []
+        for r in results:
+            if isinstance(r, Exception):
+                logger.warning("Query collection failed: %s", r)
+                continue
+            all_results.extend(r)
 
         # Sort by RRF score descending
         all_results.sort(key=lambda x: x["score"], reverse=True)
@@ -553,22 +549,55 @@ class DocumentStore:
     async def _query_single_collection(
         self, collection_id: str, query_text: str, top_k: int, category_filter: str | None = None
     ) -> list[dict[str, Any]]:
-        """Vector + BM25 + RRF for a single collection."""
-        # ── vector search ──
-        model = await self._get_embedding_model()
-        query_embedding = await asyncio.to_thread(model.encode, [query_text])
+        """Vector + BM25 + RRF for a single collection. Vector and BM25 run in parallel."""
         collection = self._chroma_client.get_or_create_collection(name=collection_id)
 
-        vec_kwargs: dict[str, Any] = {
-            "query_embeddings": query_embedding.tolist(),
-            "n_results": top_k * 2,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if category_filter:
-            vec_kwargs["where"] = {"category": category_filter}
+        # ── vector search (async helper) ──
+        async def _vector_search():
+            model = await self._get_embedding_model()
+            query_embedding = await asyncio.to_thread(model.encode, [query_text])
+            vec_kwargs: dict[str, Any] = {
+                "query_embeddings": query_embedding.tolist(),
+                "n_results": top_k * 2,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if category_filter:
+                vec_kwargs["where"] = {"category": category_filter}
+            return await asyncio.to_thread(collection.query, **vec_kwargs)
 
-        vec_result = await asyncio.to_thread(collection.query, **vec_kwargs)
+        # ── bm25 search (async helper) ──
+        async def _bm25_search():
+            bm25_path = self._bm25_dir / collection_id
+            if not bm25_path.exists() or not (bm25_path / "corpus.json").exists():
+                return None, {}, []
+            try:
+                retriever = bm25s.BM25()
+                retriever = await asyncio.to_thread(retriever.load, str(bm25_path))
+                corpus_file = bm25_path / "corpus.json"
+                corpus_raw = await asyncio.to_thread(corpus_file.read_text, encoding="utf-8")
+                corpus_map = json.loads(corpus_raw)
+                corpus_ids = list(corpus_map.keys())
+                query_tokens = bm25s.tokenize(" ".join(_tokenize_chinese(query_text)))
+                bm25_k = min(top_k * 2, len(corpus_ids))
+                results, _scores = await asyncio.to_thread(retriever.retrieve, query_tokens, k=bm25_k)
+                bm25_ranking: list[tuple[str, int]] = []
+                bm25_text: dict[str, str] = {}
+                for rank, idx in enumerate(results[0], start=1):
+                    if idx < len(corpus_ids):
+                        cid = corpus_ids[idx]
+                        bm25_ranking.append((cid, rank))
+                        bm25_text[cid] = corpus_map[cid].get("text", "")
+                return corpus_map, bm25_text, bm25_ranking
+            except Exception as exc:
+                logger.warning("BM25 search failed for %s: %s", collection_id, exc)
+                return None, {}, []
 
+        # Run both searches concurrently
+        (vec_result, (_, bm25_text, bm25_ranking)) = await asyncio.gather(
+            _vector_search(), _bm25_search(),
+        )
+
+        # ── process vector results ──
         vector_ranking: list[tuple[str, int]] = []
         vector_meta: dict[str, dict[str, Any]] = {}
         vector_text: dict[str, str] = {}
@@ -588,53 +617,6 @@ class DocumentStore:
             "chunks": [
                 {"chunk_id": cid, "rank": rank, "doc_name": vector_meta.get(cid, {}).get("doc_name", ""), "distance": vec_result.get("distances", [[]])[0][i] if vec_result.get("distances") and i < len(vec_result["distances"][0]) else None}
                 for i, (cid, rank) in enumerate(vector_ranking[:10])
-            ],
-        }, level="debug")
-
-        # ── bm25 search ──
-        bm25_path = self._bm25_dir / collection_id
-        bm25_ranking: list[tuple[str, int]] = []
-        bm25_text: dict[str, str] = {}
-
-        if bm25_path.exists() and (bm25_path / "corpus.json").exists():
-            try:
-                retriever = bm25s.BM25()
-                retriever = await asyncio.to_thread(retriever.load, str(bm25_path))
-
-                # Load corpus mapping first so we can size k correctly
-                corpus_file = bm25_path / "corpus.json"
-                corpus_raw = await asyncio.to_thread(
-                    corpus_file.read_text, encoding="utf-8"
-                )
-                corpus_map = json.loads(corpus_raw)
-                corpus_ids = list(corpus_map.keys())
-
-                query_tokens = bm25s.tokenize(" ".join(_tokenize_chinese(query_text)))
-                corpus_size = len(corpus_ids)
-                bm25_k = min(top_k * 2, corpus_size)
-                results, _scores = await asyncio.to_thread(
-                    retriever.retrieve, query_tokens, k=bm25_k
-                )
-
-                # results shape: [[doc_idx_0, doc_idx_1, ...]]
-                # We need to map back to Chroma IDs
-                # corpus.json keys are Chroma chunk IDs
-                for rank, idx in enumerate(results[0], start=1):
-                    if idx < len(corpus_ids):
-                        cid = corpus_ids[idx]
-                        bm25_ranking.append((cid, rank))
-                        bm25_text[cid] = corpus_map[cid].get("text", "")
-            except Exception as exc:
-                logger.warning("BM25 search failed for %s: %s", collection_id, exc)
-
-        await trace("subagents", "rag_bm25_results", f"BM25 search returned {len(bm25_ranking)} chunks", {
-            "collection_id": collection_id,
-            "query": query_text,
-            "corpus_size": len(corpus_ids) if 'corpus_ids' in locals() else 0,
-            "bm25_k": min(top_k * 2, len(corpus_ids)) if 'corpus_ids' in locals() else top_k * 2,
-            "chunks": [
-                {"chunk_id": cid, "rank": rank}
-                for cid, rank in bm25_ranking[:10]
             ],
         }, level="debug")
 
@@ -702,6 +684,19 @@ class DocumentStore:
         }, level="debug")
 
         return output
+
+
+# ── DocumentStore singleton ────────────────────────────────────
+
+_store_singleton: DocumentStore | None = None
+
+
+def get_document_store() -> DocumentStore:
+    """Return a shared DocumentStore singleton (avoids re-creating ChromaClient per call)."""
+    global _store_singleton
+    if _store_singleton is None:
+        _store_singleton = DocumentStore()
+    return _store_singleton
 
 
 def _get_document_file_path(collection_id: str, doc_id: str) -> Path | None:

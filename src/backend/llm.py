@@ -53,6 +53,8 @@ async def chat(
 
     today = datetime.date.today().isoformat()
     date_prefix = f"Today's date: {today}. Use this as the current date when reasoning about time-sensitive topics."
+    # Shallow-copy messages to avoid mutating the caller's list
+    messages = [dict(m) for m in messages]
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = messages[0]["content"] + "\n\n" + date_prefix
     else:

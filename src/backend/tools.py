@@ -8,6 +8,7 @@ Design principle: LLM decides WHAT to do; code decides HOW to do it.
 """
 
 import asyncio
+import json
 import logging
 from typing import Any, Callable
 
@@ -81,7 +82,7 @@ async def searxng_search_tool(
         }, level="debug")
         return {"query": query, "results": cached.get("data", []), "source": "searxng", "cached": True}
 
-    result = await asyncio.to_thread(search_mod.search, query, limit=limit)
+    result = await search_mod.search(query, limit=limit)
     query_cache[query] = result if result else {"data": []}
 
     results_data: list[dict[str, Any]] = []
@@ -103,7 +104,7 @@ async def searxng_search_tool(
             if bq in query_cache:
                 bq_result = query_cache[bq]
             else:
-                bq_result = await asyncio.to_thread(search_mod.search, bq, limit=limit)
+                bq_result = await search_mod.search(bq, limit=limit)
                 query_cache[bq] = bq_result if bq_result else {"data": []}
             if bq_result and bq_result.get("data"):
                 for item in bq_result["data"]:
@@ -135,15 +136,9 @@ async def document_hybrid_search_tool(
 
     Document sources are highly trusted and marked for full-text usage.
     """
-    from .document_store import DocumentStore
+    from .document_store import get_document_store
 
-    await trace("subagents", "tool_call_start", f"document_hybrid_search: {query[:60]}", {
-        "collection_ids": collection_ids,
-        "query": query,
-        "top_k": top_k,
-    }, level="debug")
-
-    store = DocumentStore()
+    store = get_document_store()
     results = await store.query(collection_ids, query, top_k=top_k)
 
     items: list[dict[str, Any]] = []
@@ -178,7 +173,6 @@ async def evaluate_sources_tool(
     Returns scored sources + a list of URLs selected for full-text reading.
     Internally uses batch LLM evaluation + source diversity enforcement.
     """
-    from .config import get_config
 
     if max_per_domain is None:
         max_per_domain = get_config().max_sources_per_domain
@@ -200,11 +194,12 @@ async def evaluate_sources_tool(
             seen_urls.add(url)
             unique_candidates.append(c)
 
-    # Batch LLM evaluation
+    # Batch LLM evaluation — all batches in parallel
+    from .helpers import extract_json
+
     batch_size = 20
-    scored: list[dict[str, Any]] = []
-    for i in range(0, len(unique_candidates), batch_size):
-        batch = unique_candidates[i:i + batch_size]
+
+    async def _eval_batch(batch: list[dict[str, Any]], batch_idx: int) -> list[dict[str, Any]]:
         sources_text = ""
         for idx, s in enumerate(batch):
             snippet = s.get("description", "") or s.get("snippet", "")
@@ -222,8 +217,6 @@ async def evaluate_sources_tool(
                 temperature=0.1,
             )
             content = response.strip()
-            import json
-            from .helpers import extract_json
             try:
                 result = json.loads(content)
             except json.JSONDecodeError:
@@ -235,13 +228,20 @@ async def evaluate_sources_tool(
                 src["quality_score"] = max(0.0, min(1.0, raw))
                 src["full_text"] = bool(ev.get("full_text", False)) if ev else False
                 src["reasoning"] = ev.get("reason", "") if ev else ""
-                scored.append(src)
+            return batch
         except Exception as exc:
-            logger.warning("Batch evaluate failed for batch %d: %s", i, exc)
+            logger.warning("Batch evaluate failed for batch %d: %s", batch_idx, exc)
             for src in batch:
                 src["quality_score"] = 0.3
                 src["full_text"] = False
-                scored.append(src)
+            return batch
+
+    batch_tasks = [
+        _eval_batch(unique_candidates[i:i + batch_size], i // batch_size)
+        for i in range(0, len(unique_candidates), batch_size)
+    ]
+    batch_results = await asyncio.gather(*batch_tasks)
+    scored: list[dict[str, Any]] = [src for batch in batch_results for src in batch]
 
     # Document sources are highly trusted
     for s in scored:

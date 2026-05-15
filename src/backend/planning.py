@@ -62,26 +62,131 @@ def _build_planner_tools(
     return tools
 
 
-def _parse_plan_json(text: str) -> dict[str, Any] | None:
+def _parse_plan_json(text: str, user_query: str = "") -> dict[str, Any] | None:
     """Try to parse a JSON plan from the planner's final_answer."""
     text = text.strip()
+    parsed = None
+    
     try:
         parsed = json.loads(text)
-        if isinstance(parsed, dict) and "dimensions" in parsed:
-            return parsed
     except json.JSONDecodeError:
-        pass
+        extracted = extract_json(text)
+        if extracted:
+            try:
+                parsed = json.loads(extracted)
+            except json.JSONDecodeError:
+                pass
+    
+    if not isinstance(parsed, dict) or "dimensions" not in parsed:
+        return None
+    
+    # Ensure requirements field exists with meaningful content
+    requirements = parsed.get("requirements", {})
+    if not requirements or not any(requirements.values()):
+        # Fallback: extract requirements from user_query
+        requirements = _extract_requirements_from_query(user_query or parsed.get("user_query", ""))
+        parsed["requirements"] = requirements
+    
+    return parsed
 
-    extracted = extract_json(text)
-    if extracted:
-        try:
-            parsed = json.loads(extracted)
-            if isinstance(parsed, dict) and "dimensions" in parsed:
-                return parsed
-        except json.JSONDecodeError:
-            pass
 
-    return None
+def _extract_requirements_from_query(query: str) -> dict[str, Any]:
+    """Extract task requirements from user query using simple heuristics."""
+    import re
+    
+    query_lower = query.lower()
+    
+    # Detect core objectives
+    core_objectives = []
+    if any(kw in query_lower for kw in ["比较", "对比", "横向", "compare", "comparison"]):
+        core_objectives.append("横向比较多个对象")
+    if any(kw in query_lower for kw in ["评估", "评价", "推荐", "evaluate", "recommend", "rank"]):
+        core_objectives.append("评估并给出推荐")
+    if any(kw in query_lower for kw in ["预测", "forecast", "predict", "趋势", "未来"]):
+        core_objectives.append("预测未来趋势")
+    if any(kw in query_lower for kw in ["分析", "analyze", "analysis"]):
+        core_objectives.append("深入分析")
+    if not core_objectives:
+        core_objectives.append("Research the given topic thoroughly")
+    
+    # Detect explicit requirements
+    explicit_requirements = []
+    
+    # Check for specific counts (e.g., "2-3家", "top 10")
+    count_patterns = [
+        r'(\d+)[-–—](\d+)(?:家|个|款|种|人)?',
+        r'(?:top|前)\s*(\d+)',
+        r'(\d+)\s*(?:家|个|款|种)',
+    ]
+    for pattern in count_patterns:
+        match = re.search(pattern, query)
+        if match:
+            explicit_requirements.append(f"需要涉及 {match.group(0)} 的对象")
+            break
+    
+    # Check for dimension comparisons
+    dim_keywords = ["维度", "方面", "角度", "指标", "要素"]
+    for kw in dim_keywords:
+        if kw in query:
+            explicit_requirements.append("需要从多个维度进行比较分析")
+            break
+    
+    # Detect scope constraints
+    scope_constraints = {"region": "", "time": "", "target": ""}
+    
+    # Geographic scope
+    region_patterns = {
+        "中国": r"中国|国内|内地|china",
+        "美国": r"美国|usa|america",
+        "日本": r"日本|japan",
+        "欧洲": r"欧洲|europe|欧盟",
+        "全球": r"全球|国际|world|global",
+    }
+    for region, pattern in region_patterns.items():
+        if re.search(pattern, query_lower):
+            scope_constraints["region"] = region
+            break
+    
+    # Temporal scope
+    time_patterns = {
+        "过去五年": r"(?:过去|近|最近)\s*[5五]\s*年",
+        "过去十年": r"(?:过去|近|最近)\s*(?:10|十)\s*年",
+        "2020-2050": r"2020.*2050|2020.*to.*2050",
+        "当前": r"目前|当前|现在|现今",
+    }
+    for time_range, pattern in time_patterns.items():
+        if re.search(pattern, query_lower):
+            scope_constraints["time"] = time_range
+            break
+    
+    # Target scope
+    if "公司" in query:
+        scope_constraints["target"] = "公司"
+    elif "产品" in query:
+        scope_constraints["target"] = "产品"
+    elif "技术" in query:
+        scope_constraints["target"] = "技术"
+    elif "市场" in query:
+        scope_constraints["target"] = "市场"
+    
+    # Extract sub-questions (split by punctuation)
+    sub_questions = []
+    # Split by question marks or enumeration markers
+    parts = re.split(r'[？?]|(?:\d+[、.])', query)
+    for part in parts:
+        part = part.strip()
+        if len(part) > 10 and len(part) < 200:
+            sub_questions.append(part)
+    
+    if not sub_questions:
+        sub_questions = [query]
+    
+    return {
+        "core_objectives": core_objectives,
+        "explicit_requirements": explicit_requirements,
+        "scope_constraints": scope_constraints,
+        "sub_questions": sub_questions[:5],  # Limit to 5 sub-questions
+    }
 
 
 async def generate_research_plan(
@@ -119,7 +224,7 @@ async def generate_research_plan(
 
         final_answer = result.get("final_answer", "")
         if final_answer:
-            plan = _parse_plan_json(final_answer)
+            plan = _parse_plan_json(final_answer, user_query)
             if plan:
                 logger.info(
                     "Planner ReAct completed in %d steps, %d dimensions",
@@ -195,6 +300,12 @@ async def _generate_plan_single_pass(
         }],
         "output_structure": ["Introduction", "Analysis", "Conclusions"],
         "methodology": "broad web research",
+        "requirements": {
+            "core_objectives": ["Research the given topic thoroughly"],
+            "explicit_requirements": [],
+            "scope_constraints": {"region": "", "time": "", "target": ""},
+            "sub_questions": [user_query],
+        },
     }
 
 

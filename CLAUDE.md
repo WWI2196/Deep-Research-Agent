@@ -35,11 +35,11 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
   - `planning.py` — Planning-phase agents: `generate_research_plan` (structured JSON), `split_into_subtasks` (self-heal retry)
   - `subagent.py` — Subagent orchestration: fuzzy-dedup `generate_search_queries`, `batch_evaluate_sources` (merged score+select), `run_subagent` (query cache, empty-result rollback, evidence compression, [src:] marker validation), `run_subagents_parallel`. New: `_search_document_collections()` parallel document hybrid retrieval.
   - `synthesis.py` — Synthesis: `synthesize_report` (single-pass + truncation continuation + failure summary retry), `add_citations` (rule-based [src: url] → [^n] + URL liveness verification + auto strip duplicate References), `_generate_failure_summary`, `_deepen_thin_sections` (expands thin sections with high-importance evidence). Section replacement ensures trailing `\n\n` to prevent heading粘连.
-  - `search.py` — SearXNG search + dual-path content extraction (`requests` + `trafilatura` fast path; `Crawl4AI` browser-render fallback for JS-heavy pages)
+  - `search.py` — SearXNG search (async via aiohttp connection pool) + three-tier content extraction: trafilatura fast path (~0.2s) → Crawl4AI browser pool (shared singleton, ~4s) → Chrome fallback (~6s). PDF extraction via shared aiohttp pool.
   - `prompts.py` — System prompt templates for 6 roles + evaluation. Subagent/Synthesis prompts removed automatic Sources/References generation, use inline citations only.
-  - `persistence.py` — SQLite persistence (runs, checkpoints, sources, subagent_reports, **collections, documents**). All I/O via `asyncio.to_thread`. `update_run_status` only sets `completed_at` for terminal states (completed/cancelled/failed).
+  - `persistence.py` — SQLite persistence (runs, checkpoints, sources, subagent_reports, **collections, documents**). Thread-local connection pool with WAL mode + 8MB cache. `close_connections()` for shutdown cleanup. `update_run_status` only sets `completed_at` for terminal states (completed/cancelled/failed).
   - `export.py` — Markdown export
-  - `document_store.py` — **v3** Chroma + bm25s + RRF hybrid retrieval core. `DocumentStore` class encapsulates vector store, keyword index, document management. Supports async parsing, re-indexing, category filtering.
+  - `document_store.py` — **v4** Chroma + bm25s + RRF hybrid retrieval core. `DocumentStore` class with singleton pattern (`get_document_store()`). Parallel collection queries via `asyncio.gather`. Vector + BM25 searches run concurrently within each collection. Supports async parsing, re-indexing, category filtering.
   - `document_parser.py` — **v3** PDF/DOCX/TXT/MD/HTML unified parsing entry
   - `tracing.py` — **v3** Structured tracing for research runs. `trace()` / `trace_llm_call()` use `contextvars` to propagate `run_id` implicitly through async call stacks. Log levels: debug/info/warning/error, controlled by `AppConfig.log_level`. `trace_llm_call` stores `error` as `None` when absent (not empty string) to avoid false positives in `error IS NOT NULL` queries.
   - `providers/` — `OpenAICompatibleProvider` and `AnthropicProvider` (+ base class with exponential backoff)
@@ -49,20 +49,22 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
   - **New**: `log-viewer.js` — Debug log viewer with phase/type filters, search, expandable details, and LLM-call latency display. Attachable to report page and history rows.
   - Infrastructure: `app.js` (router + page lifecycle), `api.js` (HTTP+SSE), `store.js` (`createStore()` event-driven state)
 
-**Pipeline**: LangGraph `StateGraph` with **7 async nodes** in [src/backend/graph.py](src/backend/graph.py). Flow: `init → plan → split → subagents → reflection → (loop or proceed) → synthesize → cite → END`. Scale node removed; budget per subtask via `estimated_searches` field. Reflection re-runs use `_subtask_report_map` for precise subtask_id-based deduplication. New: synthesis retry on truncation/low-quality with failure summary; cite node runs concurrent URL liveness check; `_deepen_thin_sections` expands thin sections with trailing newline guard.
+**Pipeline**: LangGraph `StateGraph` with **7 async nodes** in [src/backend/graph.py](src/backend/graph.py). Flow: `init → plan → split → subagents → reflection → (loop or proceed) → synthesize → cite → END`. Scale node removed; budget per subtask via `estimated_searches` field. Reflection re-runs use `_subtask_report_map` for precise subtask_id-based deduplication. New: synthesis retry on truncation/low-quality with failure summary; cite node runs concurrent URL liveness check; `_deepen_thin_sections` expands all thin sections in parallel (max 3 concurrent LLM calls); persistence calls in each node parallelized via `asyncio.gather`.
 
 **State**: `ResearchState` (TypedDict in [src/backend/models.py](src/backend/models.py)) — holds query, plan (dict), subtasks, subagent reports, sources, iteration count, cited report, memory, query_cache, synthesis_retry_count, context_compress_retries, keep_tool_results, **document_collections**. `research_plan` is now a structured dict with `dimensions`, `output_structure`, `methodology`. Additionally maintains `_subtask_report_map: dict[str, str]` (subtask_id → report) for precise deduplication when reflection re-runs subtasks.
 
-**LLM routing** ([src/backend/config.py](src/backend/config.py)): Priority chain: env var > `~/.deep-research/config.yaml` > built-in default. 7 roles (planner, splitter, subagent, evaluator, coordinator, reflection, citation) can each use a different provider+model. Config supports `${VAR}` env substitution. Six built-in providers: mimo, openai, anthropic, gemini, deepseek, openrouter.
+**LLM routing** ([src/backend/config.py](src/backend/config.py)): Priority chain: env var > `~/.deep-research/config.yaml` > built-in default. 7 roles (planner, splitter, subagent, evaluator, coordinator, reflection, citation) can each use a different provider+model. Config supports `${VAR}` env substitution. Six built-in providers: mimo, openai, anthropic, gemini, deepseek, openrouter. `chat()` in `llm.py` shallow-copies messages list before modification to prevent date prefix accumulation across calls.
 
-**Search** ([src/backend/search.py](src/backend/search.py)): SearXNG (self-hosted, 70+ engines aggregated) via JSON API at `http://127.0.0.1:8080`. No API key needed. Content extraction: `requests.get` + `trafilatura.extract` for fast path; `Crawl4AI` (`AsyncWebCrawler` with playwright Chromium / system Chrome fallback) for JS-rendered pages.
+**Search** ([src/backend/search.py](src/backend/search.py)): SearXNG (self-hosted, 70+ engines aggregated) via async aiohttp with connection pool (`TCPConnector(limit=30, limit_per_host=10)`). No API key needed. Content extraction: three-tier pipeline — (1) `trafilatura` fast path (~0.2s, handles 80-90% of static pages); (2) Crawl4AI browser pool (shared singleton `AsyncWebCrawler` with `Semaphore(4)`, ~4s) for JS-rendered pages; (3) Chrome fallback (standalone, ~6s). PDF extraction uses shared aiohttp pool (not `requests.get`).
 
 **RAG / Document Library** ([src/backend/document_store.py](src/backend/document_store.py)):
+- **Singleton**: Use `get_document_store()` to get shared instance (avoids re-creating ChromaClient per call)
 - **Vector DB**: Chroma (file-persistent, `~/.deep-research/chroma/`)
 - **Embedding**: BAAI/bge-small-zh-v1.5 (384-dim, ~50MB, Chinese-optimized)
 - **Keyword search**: bm25s + jieba Chinese tokenization
 - **Fusion**: RRF (Reciprocal Rank Fusion, k=60)
-- **Hybrid flow**: Chroma vector search + bm25s keyword search → RRF fusion → Top-K chunks
+- **Hybrid flow**: Chroma vector search + bm25s keyword search run **concurrently** → RRF fusion → Top-K chunks
+- **Multi-collection**: All collections queried **in parallel** via `asyncio.gather`
 - **Pipeline integration**: subagent stage runs SearXNG search and document library hybrid retrieval in parallel. Document sources marked `source: "document"`, quality_score floor 0.85, skip trafilatura and use chunk text directly as evidence.
 - **Async parsing**: Upload API returns pending immediately; background asyncio task performs parse → chunk → embed → rebuild index
 - **Re-indexing**: Supports single-document and full-collection re-indexing
@@ -72,9 +74,9 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 - `generate_research_plan`: Structured JSON output with dimensions (name, scope, keywords, source_types) + output_structure
 - `split_into_subtasks`: Self-heal — JSON parse failure feeds error back to LLM for retry; falls back to dimension-per-subtask
 - `generate_search_queries`: **Rules-based** (no LLM) — keywords × source_type modifiers + fuzzy Jaccard dedup. Fallback to title if no keywords.
-- `batch_evaluate_sources`: Single LLM call per batch — scores quality AND decides full_text in one response (merged SOURCE_EVALUATE prompt)
-- `run_subagent`: 6-step flow — rules queries → SearXNG search (query cache + empty-result rollback) + **document library hybrid search** → evaluate+select → `extract_async()` (trafilatura fast path + Crawl4AI browser fallback) → build evidence (keep_tool_results compression) → write report with `[src: url]` markers. Retries on empty report or missing citations.
-- `synthesize_report`: Single-pass LLM with max_tokens=16384, 6-round truncation continuation, failure_summary inject for retry. Fallback to concatenation. `_deepen_thin_sections` expands thin sections with high-importance evidence; replacement ensures trailing `\n\n` to prevent heading粘连.
+- `batch_evaluate_sources`: All batches evaluated **in parallel** via `asyncio.gather` — scores quality AND decides full_text in one response per batch (merged SOURCE_EVALUATE prompt)
+- `run_subagent`: 6-step flow — rules queries → SearXNG search (query cache + empty-result rollback) + **document library hybrid search** → evaluate+select (parallel batches) → `extract_async()` (trafilatura fast path → Crawl4AI browser pool → Chrome fallback) → build evidence (keep_tool_results compression) → write report with `[src: url]` markers. Retries on empty report or missing citations.
+- `synthesize_report`: Single-pass LLM with max_tokens=30000, 6-round truncation continuation, failure_summary inject for retry. Fallback to concatenation. `_deepen_thin_sections` expands all thin sections **in parallel** (max 3 concurrent LLM calls via `asyncio.Semaphore`); replacement ensures trailing `\n\n` to prevent heading粘连.
 - `add_citations`: **Rule-based** (no LLM) — parses `[src: url]`, normalizes URLs, deduplicates, assigns `[^n]`, generates References, concurrently verifies URL accessibility via trafilatura, marks unverified sources. **Auto strips duplicate References/Sources sections generated by LLM**.
 - `_generate_failure_summary`: Generates compact post-mortem for synthesis retry (what happened, covered, missing, remaining findings)
 - `_verify_citation_urls`: Concurrent 8-way trafilatura fetch to check URL liveness (10s timeout each). `file://` paths checked with `Path.exists()`.
@@ -84,11 +86,11 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 - `query_similarity`: Jaccard word-token similarity for fuzzy query dedup
 - `generate_broader_queries`: Strips modifiers for empty-result fallback queries
 
-**Persistence** ([src/backend/persistence.py](src/backend/persistence.py)): Local SQLite at `~/.deep-research/history.db`. **Eight tables**: `runs`, `checkpoints`, `sources`, `subagent_reports`, `collections`, `documents`, `trace_logs`, `llm_calls`. Checkpoints written after every pipeline phase. Sources and subagent reports persisted during subagent completion. Trace logs and LLM call records written via `tracing.py` (contextvar-scoped).
+**Persistence** ([src/backend/persistence.py](src/backend/persistence.py)): Local SQLite at `~/.deep-research/history.db`. Thread-local connection pool with WAL mode + 8MB cache (no new connection per operation). `close_connections()` for shutdown cleanup. **Eight tables**: `runs`, `checkpoints`, `sources`, `subagent_reports`, `collections`, `documents`, `trace_logs`, `llm_calls`. Checkpoints written after every pipeline phase. Sources and subagent reports persisted during subagent completion. Trace logs and LLM call records written via `tracing.py` (contextvar-scoped). All persistence calls in `graph.py` nodes parallelized via `asyncio.gather`.
 
 **SSE streaming** ([src/backend/server.py](src/backend/server.py)): `POST /api/research/stream` returns SSE stream. Events flow through `asyncio.Queue`. `_translate_event()` maps internal events to wire format.
 
-**Parallelism**: Subagents run concurrently via `asyncio.gather`. Search and extract also use `asyncio.gather` (with `asyncio.to_thread` for sync trafilatura I/O). SQLite I/O via `asyncio.to_thread`. Document parsing runs in background `asyncio.Task` with per-collection `asyncio.Lock`.
+**Parallelism**: Subagents run concurrently via `asyncio.gather`. Batch evaluations run in parallel. Search and extract use `asyncio.gather` (with `asyncio.to_thread` for sync trafilatura I/O). SQLite uses thread-local connection pool (WAL mode). Document parsing runs in background `asyncio.Task` with per-collection `asyncio.Lock`. Multi-collection queries run in parallel. Vector + BM25 searches run concurrently within each collection. Persistence calls in graph nodes parallelized via `asyncio.gather`. All sync DB calls in server.py wrapped with `asyncio.to_thread`.
 
 **Frontend** ([src/renderer/](src/renderer/)): Single-page app with **6 pages** (Home, Dashboard, Report, History, **Library**, Settings). State via `createStore()` — `store.get/set/subscribe/reset`. Page lifecycle via `onPageCleanup(page, fn)` — navigates clean up listeners and timers. Markdown via CDN-loaded `marked.js`.
 
@@ -134,5 +136,8 @@ curl "http://127.0.0.1:8080/search?q=test&format=json"  # verify
 
 - SearXNG must be running for search to work (`docker compose up -d` in `~/searxng/`)
 - Start server with `uv run uvicorn src.backend.server:app --host 127.0.0.1 --port 8787`, then open `http://127.0.0.1:8787` in browser
-- Content extraction: `requests` + `trafilatura` fast path, `Crawl4AI` browser-render fallback for JS-heavy pages; no paid scraping APIs
+- Content extraction: trafilatura fast path → Crawl4AI browser pool → Chrome fallback; no paid scraping APIs
+- Connection pools: Crawl4AI browser pool, aiohttp HTTP pool, SQLite thread-local pool — do NOT create new connections per call
+- `DocumentStore`: Use `get_document_store()` singleton, do NOT instantiate `DocumentStore()` directly
 - `save_config()` must preserve `providers` and other unmanaged sections in config.yaml
+- LLM messages: Always shallow-copy messages list before modification (date prefix injection in `chat()`)

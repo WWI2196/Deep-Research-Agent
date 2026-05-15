@@ -6,17 +6,12 @@ import logging
 import re
 from typing import Any
 
-from .config import get_config
 from .helpers import (
-    enforce_source_diversity,
-    enforce_source_type_quota,
     extract_json,
-    generate_broader_queries,
-    normalize_search_item,
     query_similarity,
 )
 from .llm import chat
-from .prompts import SOURCE_EVALUATE, SUBAGENT_REPORT
+from .prompts import SOURCE_EVALUATE
 from .tracing import trace
 
 logger = logging.getLogger(__name__)
@@ -105,14 +100,14 @@ async def batch_evaluate_sources(
     """Evaluate source quality AND decide full-text-worthiness in one LLM call.
 
     Each source gets a quality_score (0.0-1.0) and a full_text flag.
+    All batches evaluated in parallel.
     """
     if not sources:
         return []
 
     batch_size = 20
-    scored: list[dict[str, Any]] = []
-    for i in range(0, len(sources), batch_size):
-        batch = sources[i : i + batch_size]
+
+    async def _eval_batch(batch: list[dict[str, Any]], batch_idx: int) -> list[dict[str, Any]]:
         sources_text = ""
         for idx, s in enumerate(batch):
             snippet = s.get("description", "") or s.get("snippet", "")
@@ -141,13 +136,19 @@ async def batch_evaluate_sources(
                 src["quality_score"] = max(0.0, min(1.0, raw))
                 src["full_text"] = bool(ev.get("full_text", False)) if ev else False
                 src["reasoning"] = ev.get("reason", "") if ev else ""
-                scored.append(src)
+            return batch
         except Exception:
             for src in batch:
                 src["quality_score"] = 0.3
                 src["full_text"] = False
-                scored.append(src)
-    return scored
+            return batch
+
+    batch_tasks = [
+        _eval_batch(sources[i:i + batch_size], i // batch_size)
+        for i in range(0, len(sources), batch_size)
+    ]
+    batch_results = await asyncio.gather(*batch_tasks)
+    return [src for batch in batch_results for src in batch]
 
 
 async def _refine_queries_if_needed(
@@ -187,9 +188,9 @@ async def _search_document_collections(
     user_query: str,
 ) -> dict[str, Any] | None:
     """Search private document collections using hybrid retrieval."""
-    from .document_store import DocumentStore
+    from .document_store import get_document_store
 
-    store = DocumentStore()
+    store = get_document_store()
     query = subtask.get("objective") or subtask.get("title") or user_query
     await trace("subagents", "rag_search_start", f"Searching document collections", {
         "collection_ids": collection_ids,
@@ -301,6 +302,29 @@ async def run_subagent(
         f"Subtask: {stitle} ({sid})",
         f"Objective: {subtask.get('objective', '')}",
     ]
+    
+    # Inject task requirements into user prompt
+    # Try to extract requirements from research_plan JSON
+    try:
+        plan_dict = json.loads(research_plan) if isinstance(research_plan, str) else research_plan
+        requirements = plan_dict.get("requirements", {})
+        if requirements:
+            req_parts = ["\n[TASK REQUIREMENTS - CRITICAL]"]
+            if requirements.get("core_objectives"):
+                req_parts.append(f"Core Objectives: {', '.join(requirements['core_objectives'])}")
+            if requirements.get("explicit_requirements"):
+                req_parts.append(f"Explicit Requirements: {', '.join(requirements['explicit_requirements'])}")
+            if requirements.get("scope_constraints"):
+                constraints = requirements["scope_constraints"]
+                constraint_strs = [f"{k}: {v}" for k, v in constraints.items() if v]
+                if constraint_strs:
+                    req_parts.append(f"Scope Constraints: {', '.join(constraint_strs)}")
+            if requirements.get("sub_questions"):
+                req_parts.append(f"Sub-questions to answer: {', '.join(requirements['sub_questions'])}")
+            user_prompt_parts.append("\n".join(req_parts))
+    except (json.JSONDecodeError, TypeError):
+        pass
+    
     if document_collections:
         user_prompt_parts.append(
             f"Document collections available: {document_collections}. "

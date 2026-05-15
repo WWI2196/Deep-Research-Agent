@@ -12,7 +12,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import get_config, reload_config, save_config
-from .document_store import DocumentStore
+from .document_store import get_document_store
 from .export import export_markdown
 from .graph import build_and_run_graph
 from .models import (
@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 active_runs: dict[str, dict] = {}
 _cancel_flags: dict[str, asyncio.Event] = {}
-_doc_store = DocumentStore()
+_doc_store = get_document_store()
 
 
 def serialize_event(event_type: str, data: dict) -> str:
@@ -84,6 +84,15 @@ async def startup():
     init_db()
 
 
+@app.on_event("shutdown")
+async def shutdown():
+    from .persistence import close_connections
+    from .search import cleanup as search_cleanup
+
+    await search_cleanup()
+    close_connections()
+
+
 async def _run_research(state: dict[str, Any], run_id: str) -> None:
     """Background task wrapper that executes the research graph."""
     try:
@@ -97,7 +106,7 @@ async def _run_research(state: dict[str, Any], run_id: str) -> None:
         final_content = final_state.get("cited_report") or final_state.get("report", "")
         report_path = ""
         if final_content:
-            report_path = export_markdown(final_content)
+            report_path = await asyncio.to_thread(export_markdown, final_content)
 
         source_count = len(final_state.get("sources", []))
         report_count = len(final_state.get("subagent_reports", []))
@@ -282,16 +291,19 @@ async def cancel_research(run_id: str):
 
 @app.get("/api/research/history")
 async def history(limit: int = 20):
-    return {"history": get_run_history(limit)}
+    result = await asyncio.to_thread(get_run_history, limit)
+    return {"history": result}
 
 
 @app.get("/api/research/{run_id}/status")
 async def get_research_status(run_id: str):
-    run = get_run_by_id(run_id)
+    run, checkpoint = await asyncio.gather(
+        asyncio.to_thread(get_run_by_id, run_id),
+        asyncio.to_thread(get_latest_checkpoint, run_id),
+    )
     if not run:
         raise HTTPException(status_code=404, detail="Research run not found")
 
-    checkpoint = get_latest_checkpoint(run_id)
     phase = checkpoint.get("phase", "") if checkpoint else ""
     state = checkpoint.get("state", {}) if checkpoint else {}
 
@@ -333,10 +345,10 @@ async def delete_research(run_id: str):
 
 @app.get("/api/research/{run_id}/report")
 async def get_report(run_id: str):
-    report = get_run_report(run_id)
+    report = await asyncio.to_thread(get_run_report, run_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    report["content"] = get_report_content(run_id)
+    report["content"] = await asyncio.to_thread(get_report_content, run_id)
     return report
 
 
@@ -407,25 +419,23 @@ async def list_models():
 
 @app.get("/api/research/{run_id}/logs")
 async def get_logs(run_id: str, phase: str = "", level: str = "", event_type: str = "", limit: int = 2000):
-    logs = get_run_logs(
-        run_id,
-        phase=phase or None,
-        level=level or None,
-        event_type=event_type or None,
-        limit=limit,
+    logs = await asyncio.to_thread(
+        get_run_logs, run_id,
+        phase=phase or None, level=level or None,
+        event_type=event_type or None, limit=limit,
     )
     return {"run_id": run_id, "logs": logs}
 
 
 @app.get("/api/research/{run_id}/llm-calls")
 async def get_llm_calls(run_id: str, role: str = "", limit: int = 2000):
-    calls = get_run_llm_calls(run_id, role=role or None, limit=limit)
+    calls = await asyncio.to_thread(get_run_llm_calls, run_id, role=role or None, limit=limit)
     return {"run_id": run_id, "calls": calls}
 
 
 @app.get("/api/research/{run_id}/timeline")
 async def get_timeline(run_id: str, limit: int = 3000):
-    items = get_run_timeline(run_id, limit=limit)
+    items = await asyncio.to_thread(get_run_timeline, run_id, limit=limit)
     return {"run_id": run_id, "items": items}
 
 

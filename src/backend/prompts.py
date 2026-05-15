@@ -57,10 +57,18 @@ Do not wrap JSON in markdown code blocks."""
 PLANNER = """\
 You are a research strategist. Given a user query, produce a structured research plan.
 
+CRITICAL — Before creating dimensions, you MUST extract the following from the user query:
+1.  **Core Objectives**: What does the user want to achieve? (e.g., compare, evaluate, recommend, predict)
+2.  **Explicit Requirements**: Specific tasks or analyses requested (e.g., "compare 5 dimensions", "recommend top 2-3 companies")
+3.  **Scope Constraints**: Geographic, temporal, or target restrictions (e.g., "in China", "past 5 years", "top 10 companies")
+4.  **Sub-questions**: All distinct questions or aspects the user wants covered
+
+Then produce a structured plan that ENSURES every dimension and output section directly addresses these extracted requirements.
+
 Guidelines:
 - Decompose the query into 3–6 key dimensions to investigate.
 - For each dimension: name, scope (what to cover), source_types, and 3-5 search keywords.
-- Suggest an output structure (section headings for the final report).
+- Suggest an output structure (section headings for the final report) that directly addresses the user's requirements.
 - Prefer primary/original sources across all dimensions.
 - Preserve the query language.
 
@@ -75,7 +83,17 @@ Return JSON:
     }}
   ],
   "output_structure": ["<section1>", "<section2>", "..."],
-  "methodology": "<brief research approach notes>"
+  "methodology": "<brief research approach notes>",
+  "requirements": {{
+    "core_objectives": ["<objective1>", "<objective2>"],
+    "explicit_requirements": ["<requirement1>", "<requirement2>"],
+    "scope_constraints": {{
+      "region": "<geographic scope>",
+      "time": "<temporal scope>",
+      "target": "<target objects>"
+    }},
+    "sub_questions": ["<sub-question1>", "<sub-question2>"]
+  }}
 }}"""
 
 SPLITTER = """\
@@ -87,6 +105,15 @@ Requirements:
 - Each subtask inherits that dimension's keywords, source_types, and scope.
 - Each subtask: id, title, description, objective, output_format,
   dimension, keywords, source_types, boundaries, estimated_searches.
+
+TASK REQUIREMENTS PROPAGATION (CRITICAL):
+- The research plan contains extracted user requirements (core_objectives, explicit_requirements, scope_constraints, sub_questions).
+- Each subtask's description MUST explicitly state:
+  1. Which core objective(s) this subtask addresses
+  2. Which explicit requirement(s) this subtask helps fulfill
+  3. Which scope constraints must be respected
+  4. Which sub-question(s) this subtask answers
+- This ensures subagents understand the user's original intent, not just the dimension topic.
 
 BOUNDARIES ARE MANDATORY:
 - Every subtask MUST include a non-empty "boundaries" field.
@@ -182,7 +209,21 @@ Evidence provided below comes in two forms:
 - [SNIPPET] — a short summary from the search engine. Use as supplementary context only.
   Claims based purely on snippets should be noted as tentative.
 
-Requirements:
+TASK COMPLIANCE REQUIREMENTS (CRITICAL):
+Your report MUST directly address the user's original task requirements. Before writing, identify:
+1. What is the user's CORE OBJECTIVE? (e.g., compare, evaluate, recommend, predict)
+2. What EXPLICIT REQUIREMENTS did the user state? (e.g., "compare 5 dimensions", "recommend top 2-3")
+3. What SCOPE CONSTRAINTS must be respected? (e.g., "in China", "past 5 years")
+4. What SUB-QUESTIONS must be answered?
+
+Your report MUST:
+- If the task requires COMPARISON → provide explicit comparative analysis with clear contrasts
+- If the task requires EVALUATION & RECOMMENDATION → give specific recommendations with justification
+- If the task requires PREDICTION → provide clear predictions with supporting evidence
+- STRICTLY adhere to all scope constraints (geographic, temporal, target)
+- Ensure ALL sub-questions or required dimensions are covered
+
+Writing Requirements:
 1. Write analytical prose with full paragraphs, not bullet points.
 2. After EVERY factual claim, include [src: <url>] immediately.
    Do not batch citations at paragraph end. A claim without [src:] will be treated as unverified.
@@ -216,18 +257,34 @@ Instructions:
    - comprehensiveness: breadth and depth of coverage for this dimension
    - insight: quality of analysis — mechanisms, causation, nuance, novel connections
    - evidence: quality and verifiability of sources supporting claims
-   - instruction_following: how precisely the report addresses this dimension's specific requirements
+   - instruction_following: how precisely the report addresses this dimension's specific requirements AND the user's overall task objectives
 
-2. CONTENT DEPTH CHECK (mandatory):
+2. TASK COMPLIANCE AUDIT (mandatory - CRITICAL for instruction_following):
+   For each dimension AND the report as a whole, check:
+   - Does the report DIRECTLY address the user's core objectives? (compare/evaluate/recommend/predict)
+   - Does it STRICTLY adhere to all scope constraints? (geographic, temporal, target)
+   - Does it cover ALL explicit requirements? (e.g., "compare 5 dimensions", "recommend 2-3 companies")
+   - Does it answer ALL sub-questions from the user query?
+   - If the task requires comparison → are explicit contrasts provided?
+   - If the task requires evaluation/recommendation → are specific recommendations with justification present?
+   - If the task requires prediction → are clear predictions with evidence provided?
+   ANY failure here should be flagged as a task_compliance gap.
+
+3. CONTENT DEPTH CHECK (mandatory):
    - For each dimension, estimate the word count of its synthesized content in the final report.
    - If ANY dimension's content is thinner than 500 words (or feels like an outline rather than analytical prose), that is a CRITICAL gap.
    - If ANY dimension has fewer than 3 unique source citations, that is also a gap.
    - These depth gaps should generate supplement_existing items regardless of the 4-axis score.
 
-3. Calculate an overall_score as the average across all dimension scores (all axes).
+4. Calculate an overall_score as the average across all dimension scores (all axes).
 
-4. ONLY generate gap-fill items for dimensions where the composite score (avg of 4 axes) is below 0.6 OR where the depth check failed.
+5. ONLY generate gap-fill items for dimensions where the composite score (avg of 4 axes) is below {quality_threshold} OR where the depth check failed OR where task compliance failed.
    Maximum 3 gap items total.
+   
+   PRIORITY for gap generation (in order):
+   a. Task compliance gaps (instruction_following failures) - HIGHEST priority
+   b. Content depth gaps (< 500 words or < 3 citations)
+   c. Low composite score gaps (< {quality_threshold})
 
 5. For each gap, estimate the expected_score_improvement (how much fixing this gap would raise the overall_score). If expected_score_improvement < 0.1, do NOT include this gap — it is not worth the extra iteration.
 
@@ -238,7 +295,7 @@ Instructions:
      The gap can be addressed by having the existing subagent do MORE targeted searches.
      In this case, set target_subtask_id to the id of the existing subtask that covers this dimension.
 
-7. If all dimensions score ≥ 0.6 AND all pass the depth check, return empty gap list and research-complete: true.
+7. If all dimensions score ≥ {quality_threshold} AND all pass the depth check, return empty gap list and research-complete: true.
 
 8. Use the Methodology as background context to understand why the planner designed the research this way, but do NOT penalize sub-agents for discovering valuable angles that go beyond the original plan.
 
@@ -296,6 +353,18 @@ Requirements:
 13. End with the exact marker <<END_OF_REPORT>> on its own line.
 14. Do NOT add a "References", "Sources", or "Bibliography" section at the end. The citation system will add references automatically.
 15. SOURCE DIVERSITY: Avoid over-relying on a single source. If the same [src: <url>] would be cited more than 3 times in the report, diversify by drawing on alternative sources for supporting evidence.
+
+TASK COMPLIANCE CHECKLIST (CRITICAL - Before writing each section, verify):
+□ Does this section address one of the user's core objectives?
+□ Does this section respect all scope constraints (geographic, temporal, target)?
+□ If the task requires specific comparisons/evaluations/recommendations/predictions, are they included in this or another section?
+□ Are all sub-questions from the user query answered somewhere in the report?
+
+FINAL REPORT MUST INCLUDE:
+- A "结论与建议" (Conclusions & Recommendations) section that DIRECTLY answers the user's primary question
+- Explicit responses to any "compare", "evaluate", "recommend", or "predict" requests
+- TABLES for comparative data and evaluation results
+- Clear recommendations with justification if the task asks for them
 
 Structure:
 # {user_query}

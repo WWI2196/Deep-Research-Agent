@@ -1,11 +1,14 @@
 """SQLite persistence — research runs, checkpoints, sources, subagent reports.
 
 All database I/O runs via asyncio.to_thread to avoid blocking the event loop.
+Uses thread-local connection pooling: one persistent connection per thread,
+with WAL mode for concurrent read/write performance.
 """
 
 import asyncio
 import json
 import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -13,32 +16,36 @@ from typing import Any
 DB_DIR = Path.home() / ".deep-research"
 DB_PATH = DB_DIR / "history.db"
 
+# Thread-local connection pool: each thread gets one persistent connection
+_local = threading.local()
+
 
 def _get_conn() -> sqlite3.Connection:
+    """Return a thread-local SQLite connection, creating it on first use."""
     DB_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=-8000")  # 8MB cache
+        _local.conn = conn
     return conn
 
 
 def _write_sync(op):
-    """Run a write operation on a fresh connection with commit+close."""
+    """Run a write operation on the thread-local connection with commit."""
     conn = _get_conn()
-    try:
-        result = op(conn)
-        conn.commit()
-        return result
-    finally:
-        conn.close()
+    result = op(conn)
+    conn.commit()
+    return result
 
 
 def _read_sync(op):
-    """Run a read operation on a fresh connection, returning the result."""
+    """Run a read operation on the thread-local connection."""
     conn = _get_conn()
-    try:
-        return op(conn)
-    finally:
-        conn.close()
+    return op(conn)
 
 
 async def _write_async(op):
@@ -47,6 +54,17 @@ async def _write_async(op):
 
 async def _read_async(op):
     return await asyncio.to_thread(_read_sync, op)
+
+
+def close_connections():
+    """Close thread-local connections — call on shutdown."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        _local.conn = None
 
 
 def init_db() -> None:
@@ -162,7 +180,7 @@ def init_db() -> None:
     except Exception:
         pass
     conn.commit()
-    conn.close()
+
 
 
 async def persist_run(run_id: str, query: str, provider: str, model: str) -> None:
@@ -248,7 +266,7 @@ def get_run_history(limit: int = 20) -> list[dict[str, Any]]:
         "SELECT run_id, query, status, provider, model, total_sources, total_reports, iterations, started_at, completed_at, report_path FROM runs ORDER BY started_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
 
 
@@ -259,7 +277,7 @@ def get_run_by_id(run_id: str) -> dict[str, Any] | None:
         "SELECT run_id, query, status, provider, model, total_sources, total_reports, iterations, started_at, completed_at, report_path FROM runs WHERE run_id=?",
         (run_id,),
     ).fetchone()
-    conn.close()
+
     return dict(row) if row else None
 
 
@@ -270,7 +288,7 @@ def get_latest_checkpoint(run_id: str) -> dict[str, Any] | None:
         "SELECT phase, state FROM checkpoints WHERE run_id=? ORDER BY created_at DESC LIMIT 1",
         (run_id,),
     ).fetchone()
-    conn.close()
+
     if not row:
         return None
     result = dict(row)
@@ -284,7 +302,7 @@ def get_latest_checkpoint(run_id: str) -> dict[str, Any] | None:
 def get_run_report(run_id: str) -> dict[str, Any] | None:
     conn = _get_conn()
     row = conn.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
-    conn.close()
+
     return dict(row) if row else None
 
 
@@ -308,7 +326,7 @@ def get_report_content(run_id: str) -> str:
         "SELECT content FROM subagent_reports WHERE run_id=? ORDER BY created_at",
         (run_id,),
     ).fetchall()
-    conn.close()
+
     if rows:
         return "\n\n".join(r["content"] for r in rows)
 
@@ -498,7 +516,7 @@ def get_run_logs(
     query += " ORDER BY created_at ASC, id ASC LIMIT ?"
     params.append(limit)
     rows = conn.execute(query, params).fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
 
 
@@ -516,7 +534,7 @@ def get_run_llm_calls(
     query += " ORDER BY created_at ASC, id ASC LIMIT ?"
     params.append(limit)
     rows = conn.execute(query, params).fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
 
 
@@ -557,5 +575,5 @@ def get_run_timeline(run_id: str, limit: int = 3000) -> list[dict[str, Any]]:
         """,
         (run_id, run_id, limit),
     ).fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
