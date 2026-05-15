@@ -9,8 +9,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import search as search_mod
-from .helpers import needs_continuation
+from .helpers import needs_continuation, strip_llm_artifacts
 from .llm import chat
+from .models import DepthProfile, get_depth_profile
 from .prompts import DEEPEN_SECTION, FAILURE_SUMMARY, SYNTHESIS
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ async def _continue_if_truncated(
                 }],
                 max_tokens=4096,
             )
+            continuation = strip_llm_artifacts(continuation)
             if not continuation or len(continuation.strip()) < 30:
                 tail_chars = min(8000, int(tail_chars * 1.5))
                 if tail_chars > len(report):
@@ -316,6 +318,7 @@ async def synthesize_report(
     cancel_event=None,
     on_progress=None,
     requirements: dict[str, Any] | None = None,
+    depth_profile: DepthProfile | None = None,
 ) -> str:
     """Multi-pass LLM synthesis with explicit continuation on truncation.
 
@@ -324,6 +327,9 @@ async def synthesize_report(
     2. If output lacks <<END_OF_REPORT>>, explicitly continue in sequential rounds
     3. Fall back to concatenation only if synthesis completely fails
     """
+    if depth_profile is None:
+        depth_profile = get_depth_profile(2)
+
     valid_reports = [r for r in reports if r and len(r.strip()) > 100]
     if not valid_reports:
         return f"# Research Report: {user_query}\n\n## Introduction\n\nNo research findings were collected.\n"
@@ -342,7 +348,7 @@ async def synthesize_report(
         _all_subagent_citations.update(_src_pattern.findall(r))
     logger.info("Pre-extracted %d unique citations from sub-agent reports", len(_all_subagent_citations))
 
-    max_input_chars = 80000
+    max_input_chars = depth_profile.max_input_chars
     report_input = _trim_reports_by_whole(valid_reports, max_input_chars)
 
     final_report = ""
@@ -370,9 +376,13 @@ async def synthesize_report(
                 max_tokens=30000,
             )
 
+            # Strip leaked thinking/tool-call artifacts from LLM output
+            result = strip_llm_artifacts(result)
+
             # If truncated, explicitly continue until marker appears or no more truncation
             result = await _continue_if_truncated(
-                result, user_query, end_marker="<<END_OF_REPORT>>", max_rounds=6,
+                result, user_query, end_marker="<<END_OF_REPORT>>",
+                max_rounds=depth_profile.continuation_max_rounds,
                 cancel_event=cancel_event,
             )
 
@@ -419,18 +429,20 @@ async def synthesize_report(
     else:
         logger.info("All %d pre-extracted citations survived synthesis", len(_all_subagent_citations))
 
-    # Deepen thin sections for analytical depth
-    final_report = await _deepen_thin_sections(
-        final_report,
-        valid_reports,
-        user_query,
-        output_language=output_language,
-        cancel_event=cancel_event,
-        on_progress=on_progress,
-    )
+    # Deepen thin sections for analytical depth (depth 2-3 only)
+    if depth_profile.deepen_thin_sections:
+        final_report = await _deepen_thin_sections(
+            final_report,
+            valid_reports,
+            user_query,
+            output_language=output_language,
+            cancel_event=cancel_event,
+            on_progress=on_progress,
+            depth_profile=depth_profile,
+        )
 
-    # Verify task compliance and augment if needed
-    if requirements:
+    # Verify task compliance and augment if needed (depth 2-3 only)
+    if requirements and depth_profile.verify_compliance:
         final_report = await _verify_task_compliance(
             final_report,
             requirements,
@@ -454,16 +466,19 @@ async def _deepen_thin_sections(
     chat_fn=None,
     cancel_event=None,
     on_progress=None,
+    depth_profile: DepthProfile | None = None,
 ) -> str:
     """Identify thin sections and expand them with deeper analysis.
 
-    A top-level section (## heading) is "thin" if its body text is < 800
-    characters OR it contains fewer than 3 inline [src: ...] citations.
-    Only the weakest max_deepen sections are expanded to avoid runaway LLM
-    calls. Each section is deepened AT MOST ONCE.
+    A top-level section (## heading) is "thin" if its body text is below the
+    character threshold OR it contains fewer than the required inline citations.
+    Only the weakest sections are expanded to avoid runaway LLM calls.
+    Each section is deepened AT MOST ONCE.
     """
     if chat_fn is None:
         chat_fn = chat
+    if depth_profile is None:
+        depth_profile = get_depth_profile(2)
 
     # Parse top-level sections only (## headings, not ###)
     heading_pattern = re.compile(r'^(## [^#].*)$', re.MULTILINE)
@@ -486,8 +501,8 @@ async def _deepen_thin_sections(
                 continue
             char_count = len(body_text)
             citation_count = len(re.findall(r'\[src:\s*[^\]]+\]', body_text))
-            # Threshold: < 800 chars OR < 3 citations
-            if char_count < 800 or citation_count < 3:
+            # Use depth profile thresholds
+            if char_count < depth_profile.deepen_char_threshold or citation_count < depth_profile.deepen_citation_threshold:
                 thin_sections.append((i, heading, body_text))
                 deepened_headings.add(normalized_heading)
                 logger.info(
@@ -495,8 +510,8 @@ async def _deepen_thin_sections(
                     heading, char_count, citation_count,
                 )
 
-    # Cap deepening to the weakest sections to avoid runaway LLM calls
-    max_deepen = 5
+    # Cap deepening to the weakest sections based on depth profile
+    max_deepen = depth_profile.deepen_max_sections
     total_thin = len(thin_sections)
     if total_thin > max_deepen:
         # Sort by (citation_count asc, char_count asc) — weakest first
@@ -517,9 +532,9 @@ async def _deepen_thin_sections(
     # Build a searchable evidence pool from all sub-agent reports
     evidence_pool = "\n\n---\n\n".join(reports)
 
-    # Expand all thin sections in parallel
+    # Expand all thin sections in parallel with depth-aware concurrency
     total = len(thin_sections)
-    _deepen_semaphore = asyncio.Semaphore(3)  # cap concurrent LLM calls
+    _deepen_semaphore = asyncio.Semaphore(depth_profile.deepen_concurrency)
 
     async def _expand_section(heading: str, body_text: str) -> str | None:
         async with _deepen_semaphore:
@@ -543,6 +558,7 @@ async def _deepen_thin_sections(
                 }],
                 max_tokens=8000,
             )
+            expanded = strip_llm_artifacts(expanded)
             expanded = expanded.strip().replace("<<END_OF_REPORT>>", "").strip()
             if len(expanded) > len(body_text) * 1.3:
                 return expanded

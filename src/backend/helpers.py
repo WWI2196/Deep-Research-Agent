@@ -17,10 +17,67 @@ def extract_json(text: str) -> str:
     return ""
 
 
+def strip_llm_artifacts(content: str) -> str:
+    """Remove common LLM reasoning/thinking/tool-call artifacts from output."""
+    if not content:
+        return content
+
+    # Repeatedly remove leading think/thinking blocks (including any text before them)
+    for tag in ("think", "thinking"):
+        while True:
+            match = re.search(rf"^(.*?)<{tag}>.*?</{tag}>", content, flags=re.DOTALL | re.IGNORECASE)
+            if not match:
+                break
+            content = content[match.end():]
+
+    # Repeatedly remove leading tool-call blocks (including any text before them)
+    while True:
+        match = re.search(r"^(.*?)<tool_call>.*?</tool_call>", content, flags=re.DOTALL | re.IGNORECASE)
+        if not match:
+            break
+        content = content[match.end():]
+
+    # Remove standalone <function=...>...</function> blocks
+    content = re.sub(r"<function=[^>]*>.*?</function>", "", content, flags=re.DOTALL | re.IGNORECASE)
+
+    # Remove orphaned <parameter=...>...</parameter> blocks
+    content = re.sub(r"<parameter=[^>]*>.*?</parameter>", "", content, flags=re.DOTALL | re.IGNORECASE)
+
+    # Collapse multiple blank lines left by removals
+    content = re.sub(r"\n{3,}", "\n\n", content)
+
+    # After removing leading XML blocks, also strip any remaining leading
+    # first-person reasoning sentences until we hit actual report content.
+    lines = content.split("\n")
+    skip_idx = 0
+    planning_prefixes = (
+        "i'll ", "i will ", "let me ", "first, i", "i'm going to", "i am going to",
+        "based on the search results", "based on my search", "based on the results",
+        "i can now", "i will now", "i'll now", "let me now",
+        "i have gathered", "i've gathered", "i have collected", "i've collected",
+    )
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            skip_idx = i + 1
+            continue
+        if stripped.lower().startswith(planning_prefixes):
+            skip_idx = i + 1
+            continue
+        # Stop if we see a markdown heading or a substantial non-reasoning paragraph
+        if stripped.startswith("#") or len(stripped) > 40:
+            break
+        # Otherwise, this looks like normal text, stop skipping
+        break
+    if skip_idx > 0:
+        content = "\n".join(lines[skip_idx:])
+
+    return content.strip()
+
+
 def clean_think_tags(content: str) -> str:
-    if "<think>" in content and "</think>" in content:
-        return re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-    return content
+    """Backward-compatible alias for strip_llm_artifacts."""
+    return strip_llm_artifacts(content)
 
 
 def pick_first_nonempty(item: dict[str, Any], keys: list[str]) -> str:

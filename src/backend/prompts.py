@@ -185,7 +185,7 @@ Rules:
 CRITICAL — final_answer behavior:
 - When you are ready to finish, output JSON with a "final_answer" FIELD containing your COMPLETE markdown report.
 - "final_answer" is a JSON FIELD, NOT a tool to call. Do NOT write "action": "final_answer".
-- The "final_answer" must be the FULL report text (800-1500+ words), not a summary, not an outline.
+- The "final_answer" must be the FULL report text ({min_words}-{max_words}+ words), not a summary, not an outline.
 - If you previously called submit_report with a long report, your final_answer MUST be at least as long.
 
 Respond with JSON only. Either:
@@ -232,7 +232,7 @@ Writing Requirements:
 3. Discuss mechanisms, causation, context, and nuance.
 4. If sources conflict, analyze disagreements.
 5. Include specific data, dates, names where available.
-6. Write 800–1500 words.
+6. Write {min_words}–{max_words} words.
 7. Do NOT add a "Sources" or "References" section at the end — citations are inline only.
 
 Structure:

@@ -8,7 +8,7 @@ import time
 from openai import AsyncOpenAI
 
 from .config import get_config
-from .helpers import clean_think_tags
+from .helpers import strip_llm_artifacts
 from .tracing import trace_llm_call
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ async def chat(
 
             response = await client.chat.completions.create(**kwargs)
             result = response.choices[0].message.content or ""
-            result = clean_think_tags(result)
+            result = strip_llm_artifacts(result)
             latency_ms = int((time.monotonic() - start) * 1000)
             await trace_llm_call(
                 role=role,

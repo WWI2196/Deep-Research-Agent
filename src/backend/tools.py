@@ -22,6 +22,7 @@ from .helpers import (
     normalize_search_item,
 )
 from .llm import chat
+from .models import DepthProfile, get_depth_profile
 from .prompts import SOURCE_EVALUATE, SUBAGENT_REPORT
 from .tracing import trace
 
@@ -58,14 +59,17 @@ async def searxng_search_tool(
     query: str,
     limit: int = 8,
     query_cache: dict[str, dict[str, Any]] | None = None,
+    depth_profile: DepthProfile | None = None,
 ) -> dict[str, Any]:
     """Search the web using SearXNG.
 
     Uses query_cache to avoid duplicate searches across subagents.
-    On empty results, automatically falls back to broader queries.
+    On empty results, automatically falls back to broader queries (depth 2-3 only).
     """
     if query_cache is None:
         query_cache = {}
+    if depth_profile is None:
+        depth_profile = get_depth_profile(2)
 
     await trace("subagents", "tool_call_start", f"searxng_search: {query[:60]}", {
         "query": query,
@@ -97,8 +101,8 @@ async def searxng_search_tool(
         if before_filter != len(results_data):
             logger.info("Filtered %d irrelevant results for query '%s'", before_filter - len(results_data), query[:60])
 
-    # Empty-result rollback: try broader queries
-    if not results_data:
+    # Empty-result rollback: try broader queries (depth 2-3 only)
+    if not results_data and depth_profile.empty_result_rollback:
         broader_queries = generate_broader_queries(query)
         for bq in broader_queries:
             if bq in query_cache:
@@ -368,11 +372,24 @@ async def synthesize_evidence_tool(
 
 # ── submit_report tool ────────────────────────────────────────────
 
+def _get_report_word_limits(depth_profile: DepthProfile | None) -> tuple[int, int]:
+    """Return (min_words, max_words) based on depth profile."""
+    if depth_profile is None:
+        return 800, 1500
+    depth = getattr(depth_profile, "max_iterations", 2)
+    if depth <= 1:
+        return 400, 800
+    if depth >= 3:
+        return 1500, 3000
+    return 800, 1500
+
+
 async def submit_report_tool(
     evidence: list[dict[str, Any]],
     subtask: dict[str, Any],
     user_query: str,
     research_plan: str = "",
+    depth_profile: DepthProfile | None = None,
 ) -> dict[str, Any]:
     """Generate the final subagent report from collected evidence.
 
@@ -391,6 +408,8 @@ async def submit_report_tool(
         for e in evidence
     )
 
+    min_words, max_words = _get_report_word_limits(depth_profile)
+
     report = ""
     for attempt in range(2):
         retry_hint = ""
@@ -404,7 +423,10 @@ async def submit_report_tool(
                     "Every factual claim MUST be followed by [src: <url>] immediately."
                 )
             if hints:
-                retry_hint = "\n\n" + " ".join(hints) + " Write a complete 800-1500 word report with proper citations."
+                retry_hint = (
+                    "\n\n" + " ".join(hints) +
+                    f" Write a complete {min_words}-{max_words} word report with proper citations."
+                )
 
         report = await chat(
             role="subagent",
@@ -421,6 +443,8 @@ async def submit_report_tool(
                     subtask_tool_guidance=subtask.get("tool_guidance", ""),
                     subtask_source_types=subtask.get("source_types", ""),
                     subtask_boundaries=subtask.get("boundaries", ""),
+                    min_words=min_words,
+                    max_words=max_words,
                 ),
             }, {
                 "role": "user",
@@ -451,13 +475,20 @@ async def submit_report_tool(
 def build_research_tools(
     query_cache: dict[str, dict[str, Any]] | None = None,
     document_collections: list[str] | None = None,
+    depth_profile: DepthProfile | None = None,
 ) -> list[Tool]:
-    """Build tool instances bound to shared query_cache."""
+    """Build tool instances bound to shared query_cache and depth profile."""
     if query_cache is None:
         query_cache = {}
+    if depth_profile is None:
+        depth_profile = get_depth_profile(2)
 
     async def _searxng_search_wrapped(**kwargs: Any) -> dict[str, Any]:
-        return await searxng_search_tool(query_cache=query_cache, **kwargs)
+        return await searxng_search_tool(
+            query_cache=query_cache,
+            depth_profile=depth_profile,
+            **kwargs,
+        )
 
     tools: list[Tool] = [
         Tool(
@@ -484,17 +515,23 @@ def build_research_tools(
                 fn=document_hybrid_search_tool,
             )
         )
+
+    # Only add evaluate_sources for depth 2-3
+    if depth_profile.evaluate_sources:
+        tools.append(
+            Tool(
+                name="evaluate_sources",
+                description=(
+                    "Evaluate a batch of candidate sources for quality and relevance. "
+                    "Returns scored sources + a list of URLs recommended for full-text extraction. "
+                    "Automatically enforces source diversity and type quotas."
+                ),
+                params_schema={"candidates": "list[dict]", "objective": "str"},
+                fn=evaluate_sources_tool,
+            )
+        )
+
     tools.extend([
-        Tool(
-            name="evaluate_sources",
-            description=(
-                "Evaluate a batch of candidate sources for quality and relevance. "
-                "Returns scored sources + a list of URLs recommended for full-text extraction. "
-                "Automatically enforces source diversity and type quotas."
-            ),
-            params_schema={"candidates": "list[dict]", "objective": "str"},
-            fn=evaluate_sources_tool,
-        ),
         Tool(
             name="fetch_fulltext",
             description=(
@@ -531,7 +568,7 @@ def build_research_tools(
                 "sufficient evidence and are ready to finalize."
             ),
             params_schema={"evidence": "list[dict]", "subtask": "dict", "user_query": "str"},
-            fn=submit_report_tool,
+            fn=lambda **kw: submit_report_tool(**kw, depth_profile=depth_profile),
         ),
     ])
     return tools

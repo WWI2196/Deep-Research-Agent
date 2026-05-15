@@ -98,6 +98,16 @@ function initInputPage() {
       document.querySelectorAll('#depth-group .btn-option').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       inputDepth = parseInt(btn.dataset.depth);
+      // Update depth hint text
+      const hintEl = document.getElementById('depth-hint');
+      if (hintEl) {
+        const hints = {
+          1: '快速认知',
+          2: '均衡模式',
+          3: '深度研究',
+        };
+        hintEl.textContent = hints[inputDepth] || '均衡模式';
+      }
     });
   });
 

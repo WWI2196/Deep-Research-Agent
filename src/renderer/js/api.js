@@ -24,7 +24,7 @@ async function apiPost(path, body) {
 async function startResearchApi(query, depth, model, documentCollections, outputLanguage) {
   return apiPost('/api/research', {
     query,
-    max_iterations: depth,
+    depth: depth || 2,
     model: model || undefined,
     document_collections: documentCollections || undefined,
     output_language: outputLanguage || undefined,
@@ -34,7 +34,7 @@ async function startResearchApi(query, depth, model, documentCollections, output
 function startResearchStream(query, depth, model, documentCollections, outputLanguage, onEvent, onError, onDone) {
   const body = JSON.stringify({
     query,
-    max_iterations: depth,
+    depth: depth || 2,
     model: model || undefined,
     document_collections: documentCollections || undefined,
     output_language: outputLanguage || undefined,

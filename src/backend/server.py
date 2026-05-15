@@ -139,6 +139,7 @@ async def start_research(request: ResearchRequest) -> ResearchResponse:
     state = {
         "user_query": request.query,
         "run_id": run_id,
+        "depth": request.depth,
         "events": [],
         "errors": [],
         "max_iterations": request.max_iterations or 2,
@@ -190,6 +191,7 @@ async def stream_research(request: ResearchRequest):
             state = {
                 "user_query": request.query,
                 "run_id": run_id,
+                "depth": request.depth,
                 "events": [],
                 "errors": [],
                 "max_iterations": request.max_iterations or 2,
@@ -325,9 +327,9 @@ async def get_research_status(run_id: str):
         "status": run.get("status", "unknown"),
         "phase": phase,
         "progress_percent": progress_percent,
-        "iteration": state.get("iteration_count", 0),
-        "total_reports": len(state.get("subagent_reports", [])),
-        "total_sources": len(state.get("sources", [])),
+        "iteration": state.get("iteration_count", 0) or run.get("iterations", 0),
+        "total_reports": len(state.get("subagent_reports", [])) or run.get("total_reports", 0),
+        "total_sources": len(state.get("sources", [])) or run.get("total_sources", 0),
         "query": run.get("query", ""),
         "active": active,
         "started_at": run.get("started_at"),

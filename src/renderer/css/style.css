@@ -144,6 +144,14 @@ body {
 }
 .btn-option:hover { background: var(--bg-elevated); color: var(--text-primary); }
 .btn-option.active { background: var(--accent); color: white; border-color: var(--accent); }
+
+.depth-hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-left: 8px;
+  line-height: 32px;
+}
+
 .btn-primary {
   background: var(--accent);
   color: white;

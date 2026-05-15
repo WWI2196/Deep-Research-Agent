@@ -23,6 +23,7 @@ from collections import defaultdict
 from typing import Any, Callable
 
 from .helpers import extract_json
+from .models import DepthProfile, get_depth_profile
 from .tracing import trace
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ async def run_react_agent(
     role: str = "subagent",
     subtask_id: str | None = None,
     max_search_rounds: int | None = None,
+    depth_profile: DepthProfile | None = None,
 ) -> dict[str, Any]:
     """Run a ReAct agent loop.
 
@@ -56,7 +58,8 @@ async def run_react_agent(
         temperature: LLM sampling temperature.
         role: Role label passed to chat_fn (e.g. "subagent", "planner").
         subtask_id: Optional subtask identifier injected into trace events for observability.
-        max_search_rounds: Override default search budget. If None, uses MAX_SEARCH_ROUNDS_DEFAULT.
+        max_search_rounds: Override default search budget. If None, uses depth profile or default.
+        depth_profile: Depth-aware configuration for search, evaluation, and rollback behavior.
 
     Returns:
         dict with:
@@ -64,6 +67,8 @@ async def run_react_agent(
           - tool_calls: list[dict]  # complete history of tool invocations
           - steps_taken: int
     """
+    if depth_profile is None:
+        depth_profile = get_depth_profile(2)
     tool_map = {t.name: t for t in tools}
     tool_descriptions = _build_tool_descriptions(tools)
 
@@ -77,7 +82,7 @@ async def run_react_agent(
     synthesize_evidence_used = False
     consecutive_fetch_fails = 0
     search_rounds_used = 0
-    _max_search_rounds = max_search_rounds if max_search_rounds is not None else MAX_SEARCH_ROUNDS_DEFAULT
+    _max_search_rounds = max_search_rounds if max_search_rounds is not None else depth_profile.max_search_rounds
     last_search_result_count: int | None = None
     consecutive_low_results = 0
     seen_source_urls: set[str] = set()

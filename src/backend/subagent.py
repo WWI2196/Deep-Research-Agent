@@ -11,6 +11,7 @@ from .helpers import (
     query_similarity,
 )
 from .llm import chat
+from .models import DepthProfile, get_depth_profile
 from .prompts import SOURCE_EVALUATE
 from .tracing import trace
 
@@ -192,7 +193,7 @@ async def _search_document_collections(
 
     store = get_document_store()
     query = subtask.get("objective") or subtask.get("title") or user_query
-    await trace("subagents", "rag_search_start", f"Searching document collections", {
+    await trace("subagents", "rag_search_start", "Searching document collections", {
         "collection_ids": collection_ids,
         "subtask_id": subtask.get("id"),
         "subtask_title": subtask.get("title"),
@@ -233,21 +234,26 @@ async def run_subagent(
     query_cache: dict[str, list[dict[str, Any]]] | None = None,
     document_collections: list[str] | None = None,
     gap_instruction: dict[str, Any] | None = None,
+    depth_profile: DepthProfile | None = None,
 ) -> dict[str, Any]:
     """ReAct Agent-driven subagent implementation."""
+    from .prompts import SUBAGENT_REACT_SYSTEM
     from .react_agent import run_react_agent
     from .tools import build_research_tools
-    from .prompts import SUBAGENT_REACT_SYSTEM
+
+    if depth_profile is None:
+        depth_profile = get_depth_profile(2)
 
     sid = subtask.get("id") or f"fallback-{hash(subtask.get('title', '')) % 10000}"
     stitle = subtask.get("title", "Untitled")
     if query_cache is None:
         query_cache = {}
 
-    # Build tools bound to shared query_cache
+    # Build tools bound to shared query_cache, with depth-aware settings
     tools = build_research_tools(
         query_cache=query_cache,
         document_collections=document_collections,
+        depth_profile=depth_profile,
     )
 
     # Override submit_report tool to force-inject correct subtask ID/title.
@@ -285,6 +291,15 @@ async def run_subagent(
             t.fn = _bound_submit_report
             break
 
+    # Elastic word limits by depth
+    depth_val = getattr(depth_profile, "max_iterations", 2)
+    if depth_val <= 1:
+        min_words, max_words = 400, 800
+    elif depth_val >= 3:
+        min_words, max_words = 1500, 3000
+    else:
+        min_words, max_words = 800, 1500
+
     # Build system prompt
     system_prompt = SUBAGENT_REACT_SYSTEM.format(
         subtask_id=sid,
@@ -293,6 +308,8 @@ async def run_subagent(
         subtask_description=subtask.get("description", ""),
         subtask_source_types=subtask.get("source_types", ""),
         subtask_boundaries=subtask.get("boundaries", ""),
+        min_words=min_words,
+        max_words=max_words,
     )
 
     # Build user prompt with gap instruction if present
@@ -302,7 +319,7 @@ async def run_subagent(
         f"Subtask: {stitle} ({sid})",
         f"Objective: {subtask.get('objective', '')}",
     ]
-    
+
     # Inject task requirements into user prompt
     # Try to extract requirements from research_plan JSON
     try:
@@ -324,7 +341,7 @@ async def run_subagent(
             user_prompt_parts.append("\n".join(req_parts))
     except (json.JSONDecodeError, TypeError):
         pass
-    
+
     if document_collections:
         user_prompt_parts.append(
             f"Document collections available: {document_collections}. "
@@ -344,11 +361,11 @@ async def run_subagent(
         "subtask_id": sid,
         "tool_budget": tool_budget,
         "has_gap_instruction": gap_instruction is not None,
+        "depth": depth_profile.max_iterations,
     }, level="debug")
 
-    # Decouple max_steps from search budget: give enough room for
-    # search → evaluate → fetch → synthesize → write → submit flow.
-    max_steps = min(max(tool_budget * 2, 12), 18)
+    # Use depth profile for max_steps
+    max_steps = min(depth_profile.react_max_steps, max(tool_budget * 2, 8))
     result = await run_react_agent(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
@@ -357,13 +374,22 @@ async def run_subagent(
         max_steps=max_steps,
         temperature=0.3,
         subtask_id=sid,
+        depth_profile=depth_profile,
     )
 
     report = result.get("final_answer", "")
     tool_calls = result.get("tool_calls", [])
 
     # Compress overly long reports by keeping high-importance paragraphs
-    if len(report) > 8000:
+    # Depth-aware: deeper research keeps more content
+    if depth_val <= 1:
+        compress_threshold, compress_target = 5000, 4000
+    elif depth_val >= 3:
+        compress_threshold, compress_target = 15000, 12000
+    else:
+        compress_threshold, compress_target = 8000, 6000
+
+    if len(report) > compress_threshold:
         paragraphs = [p for p in report.split("\n\n") if p.strip()]
         if len(paragraphs) > 3:
             scored: list[tuple[int, str, int]] = []
@@ -377,12 +403,12 @@ async def run_subagent(
                     score += 1
                 scored.append((i, para, score))
             scored.sort(key=lambda x: x[2], reverse=True)
-            # Keep top paragraphs up to ~6000 chars
+            # Keep top paragraphs up to target length
             kept: list[tuple[int, str]] = []
             current_len = 0
             for idx, para, _ in scored:
                 para_len = len(para) + 2
-                if current_len + para_len <= 6000:
+                if current_len + para_len <= compress_target:
                     kept.append((idx, para))
                     current_len += para_len
             kept.sort(key=lambda x: x[0])
@@ -466,11 +492,14 @@ async def run_subagents_parallel(
     query_cache: dict[str, list[dict[str, Any]]] | None = None,
     document_collections: list[str] | None = None,
     gap_instructions: list[dict[str, Any]] | None = None,
+    depth_profile: DepthProfile | None = None,
 ) -> dict[str, Any]:
     if query_cache is None:
         query_cache = {}
     if gap_instructions is None:
         gap_instructions = []
+    if depth_profile is None:
+        depth_profile = get_depth_profile(2)
 
     tasks = []
     for st in subtasks:
@@ -483,6 +512,7 @@ async def run_subagents_parallel(
             query_cache=query_cache,
             document_collections=document_collections,
             gap_instruction=gap,
+            depth_profile=depth_profile,
         ))
     results = await asyncio.gather(*tasks, return_exceptions=True)
 

@@ -11,7 +11,7 @@ from langgraph.graph import END, StateGraph
 from .config import get_config
 from .helpers import extract_json, needs_continuation
 from .llm import chat
-from .models import ResearchState
+from .models import DepthProfile, ResearchState, get_depth_profile
 from .persistence import (
     persist_checkpoint,
     persist_run,
@@ -21,7 +21,7 @@ from .persistence import (
 )
 from .planning import generate_research_plan, split_into_subtasks
 from .prompts import REFLECTION
-from .subagent import run_subagent, run_subagents_parallel
+from .subagent import run_subagents_parallel
 from .synthesis import add_citations, synthesize_report
 from .tracing import current_phase, current_run_id, trace
 
@@ -61,10 +61,15 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         s["sources"] = []
         s["completed_subtasks"] = []
         s["iteration_count"] = 0
-        s["max_iterations"] = s.get("max_iterations") or 2
+
+        # Load depth profile and apply depth-specific settings
+        depth = s.get("depth", 2)
+        depth_profile = get_depth_profile(depth)
+        s["depth_profile"] = depth_profile
+        s["max_iterations"] = depth_profile.max_iterations
+        s["quality_threshold"] = depth_profile.quality_threshold
+
         s["research_complete"] = False
-        s["quality_threshold"] = s.get("quality_threshold") or cfg.quality_threshold
-        s["current_quality_score"] = 0.0
         s["memory"] = {}
         s["synthesis_retry_count"] = 0
         s["synthesis_failure_summary"] = ""
@@ -79,13 +84,16 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         s["gap_instructions"] = []
         s["tool_call_history"] = []
         s["_subtask_report_map"] = {}
+        # Seed current_quality_score to threshold so depth-1 (single iteration)
+        # does not falsely trigger a low-quality retry when reflection is skipped.
+        s["current_quality_score"] = depth_profile.quality_threshold
 
-        await trace("init", "node_enter", "Entering init node", {"run_id": s["run_id"], "query": s["user_query"]})
+        await trace("init", "node_enter", "Entering init node", {"run_id": s["run_id"], "query": s["user_query"], "depth": depth})
         await _emit({"type": "phase-update", "phase": "init",
-               "message": f"Initialised (model: {cfg.default_model})"})
+               "message": f"Initialised (model: {cfg.default_model}, depth: {depth})"})
         await _emit({"type": "progress", "phase": "init", "percent": 0})
         completed_weight += PHASE_WEIGHTS["init"]
-        await trace("init", "node_exit", "Init complete", {"model": cfg.default_model})
+        await trace("init", "node_exit", "Init complete", {"model": cfg.default_model, "depth": depth})
 
         await asyncio.gather(
             persist_run(s["run_id"], s["user_query"], cfg.base_url, cfg.default_model),
@@ -97,11 +105,13 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         current_phase.set("plan")
         nonlocal completed_weight
         await _check_cancelled()
-        await trace("plan", "node_enter", "Entering plan node")
+        depth_profile: DepthProfile = s.get("depth_profile", get_depth_profile(2))
+        await trace("plan", "node_enter", "Entering plan node", {"depth": s.get("depth", 2)})
         await _emit({"type": "phase-update", "phase": "plan", "message": "Generating research plan..."})
         plan = await generate_research_plan(
             s["user_query"],
             document_collections=s.get("document_collections") or None,
+            depth_profile=depth_profile,
         )
         s["research_plan"] = plan
         s["plan_methodology"] = plan.get("methodology", "")
@@ -128,17 +138,24 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         await _emit({"type": "progress", "phase": "plan", "percent": pct})
         completed_weight += PHASE_WEIGHTS["plan"]
 
-        await persist_checkpoint(s["run_id"], "plan", s)
+        if depth_profile.checkpoint_frequency == "all":
+            await persist_checkpoint(s["run_id"], "plan", s)
         return s
 
     async def _split_node(s: ResearchState) -> ResearchState:
         current_phase.set("split")
         nonlocal completed_weight
         await _check_cancelled()
-        await trace("split", "node_enter", "Entering split node")
+        depth_profile: DepthProfile = s.get("depth_profile", get_depth_profile(2))
+        await trace("split", "node_enter", "Entering split node", {"use_splitter": depth_profile.use_splitter})
         await _emit({"type": "phase-update", "phase": "split", "message": "Creating subtasks..."})
         try:
-            s["subtasks"] = await split_into_subtasks(s["research_plan"])
+            s["subtasks"] = await split_into_subtasks(
+                s["research_plan"],
+                use_splitter=depth_profile.use_splitter,
+                max_subagents=depth_profile.max_subagents,
+                depth_profile=depth_profile,
+            )
             await trace("split", "node_exit", "Subtasks created", {"count": len(s["subtasks"])})
         except Exception as e:
             logger.warning("Split failed, fallback: %s", e)
@@ -168,13 +185,15 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         await _emit({"type": "progress", "phase": "split", "percent": pct})
         completed_weight += PHASE_WEIGHTS["split"]
 
-        await persist_checkpoint(s["run_id"], "split", s)
+        if depth_profile.checkpoint_frequency == "all":
+            await persist_checkpoint(s["run_id"], "split", s)
         return s
 
     async def _subagents_node(s: ResearchState) -> ResearchState:
         current_phase.set("subagents")
         nonlocal completed_weight
         await _check_cancelled()
+        depth_profile: DepthProfile = s.get("depth_profile", get_depth_profile(2))
         iteration = s.get("iteration_count", 0)
         completed = set(s.get("completed_subtasks", []))
         to_run = [t for t in s.get("subtasks", []) if t.get("id", "") not in completed]
@@ -182,18 +201,16 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
             await trace("subagents", "node_exit", "No subagents to run")
             return s
 
-        # Use subtask-level estimated_searches as budget, default 10
-        budget = max(
-            t.get("estimated_searches", 10) for t in to_run
-        ) if to_run else 10
+        # Use depth profile for search budget
+        budget = depth_profile.search_budget_per_subagent
 
-        await trace("subagents", "node_enter", f"Running {len(to_run)} subagents (iteration {iteration + 1})", {"budget": budget, "document_collections": s.get("document_collections", [])})
+        await trace("subagents", "node_enter", f"Running {len(to_run)} subagents (iteration {iteration + 1})", {"budget": budget, "document_collections": s.get("document_collections", []), "depth": s.get("depth", 2)})
         await _emit({"type": "phase-update", "phase": "subagents",
                "message": f"Running {len(to_run)} subagents (iteration {iteration + 1})..."})
         await _emit({"type": "subagents-launch", "iteration": iteration + 1, "total_agents": len(to_run),
                "agent_details": [{"id": t["id"], "title": t["title"],
-                                  "description": t.get("description", "")[:200]}
-                                 for t in to_run]})
+                                   "description": t.get("description", "")[:200]}
+                                  for t in to_run]})
 
         results = await run_subagents_parallel(
             s["user_query"], json.dumps(s.get("research_plan", {}), ensure_ascii=False),
@@ -201,6 +218,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
             query_cache=s.get("query_cache", {}),
             document_collections=s.get("document_collections", []),
             gap_instructions=s.get("gap_instructions", []),
+            depth_profile=depth_profile,
         )
         await _check_cancelled()
 
@@ -280,7 +298,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
                 ))
         await asyncio.gather(*persist_tasks)
 
-        await trace("subagents", "node_exit", f"Subagents complete", {"success": results.get("success_count", 0), "total": results.get("total_count", 0), "new_sources": len(results.get("sources", []))})
+        await trace("subagents", "node_exit", "Subagents complete", {"success": results.get("success_count", 0), "total": results.get("total_count", 0), "new_sources": len(results.get("sources", []))})
         # Split subagents weight across possible iterations to avoid jumping to 99%
         max_iter = max(s.get("max_iterations", 2), 1)
         subagent_weight = PHASE_WEIGHTS["subagents"] / max_iter
@@ -288,30 +306,39 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         await _emit({"type": "progress", "phase": "subagents", "percent": pct})
         completed_weight += subagent_weight
 
-        await asyncio.gather(
-            update_run_status(
+        if depth_profile.checkpoint_frequency == "all":
+            await asyncio.gather(
+                update_run_status(
+                    s["run_id"], "running",
+                    total_sources=len(s.get("sources", [])),
+                    total_reports=len(s.get("subagent_reports", [])),
+                    iterations=s.get("iteration_count", 0),
+                ),
+                persist_checkpoint(s["run_id"], f"subagents_{iteration}", s),
+            )
+        else:
+            await update_run_status(
                 s["run_id"], "running",
                 total_sources=len(s.get("sources", [])),
                 total_reports=len(s.get("subagent_reports", [])),
                 iterations=s.get("iteration_count", 0),
-            ),
-            persist_checkpoint(s["run_id"], f"subagents_{iteration}", s),
-        )
+            )
         return s
 
     async def _reflection_node(s: ResearchState) -> ResearchState:
         current_phase.set("reflection")
         nonlocal completed_weight
         await _check_cancelled()
+        depth_profile: DepthProfile = s.get("depth_profile", get_depth_profile(2))
         iteration = s.get("iteration_count", 0)
-        max_iter = s.get("max_iterations", 2)
+        max_iter = depth_profile.max_iterations
         reports = s.get("subagent_reports", [])
         subtasks = s.get("subtasks", [])
         past = ", ".join(f"{t.get('id')}: {t.get('title')}" for t in subtasks)
 
         if iteration >= max_iter:
             quality = s.get("current_quality_score", 0.0)
-            threshold = s.get("quality_threshold", 0.6)
+            threshold = depth_profile.quality_threshold
             retry_count = s.get("synthesis_retry_count", 0)
             max_retries = s.get("context_compress_retries", cfg.context_compress_retries)
 
@@ -378,8 +405,8 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
                 else:
                     payload = {}
 
-            # Extract gaps (limit 3) — distinguish new_subtask vs supplement_existing
-            raw_gaps = payload.get("gaps", [])[:3]
+            # Extract gaps — limit based on depth profile
+            raw_gaps = payload.get("gaps", [])[:depth_profile.max_gaps]
             new_subtasks: list[dict[str, Any]] = []
             new_gap_instructions: list[dict[str, Any]] = []
             re_run_subtask_ids: set[str] = set()
@@ -416,7 +443,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
             s["current_quality_score"] = overall
 
             # Minimum improvement gate: if score gain is too small, skip gap creation
-            if overall - previous_score < 0.08:
+            if overall - previous_score < depth_profile.min_improvement_gate:
                 new_subtasks.clear()
                 new_gap_instructions.clear()
                 re_run_subtask_ids.clear()
@@ -476,21 +503,30 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         completed_weight += PHASE_WEIGHTS["reflection"]
         await trace("reflection", "node_exit", "Reflection complete")
 
-        await asyncio.gather(
-            update_run_status(
+        if depth_profile.checkpoint_frequency == "all":
+            await asyncio.gather(
+                update_run_status(
+                    s["run_id"], "running",
+                    total_sources=len(s.get("sources", [])),
+                    total_reports=len(s.get("subagent_reports", [])),
+                    iterations=s.get("iteration_count", 0),
+                ),
+                persist_checkpoint(s["run_id"], "reflection", s),
+            )
+        else:
+            await update_run_status(
                 s["run_id"], "running",
                 total_sources=len(s.get("sources", [])),
                 total_reports=len(s.get("subagent_reports", [])),
                 iterations=s.get("iteration_count", 0),
-            ),
-            persist_checkpoint(s["run_id"], "reflection", s),
-        )
+            )
         return s
 
     async def _synthesize_node(s: ResearchState) -> ResearchState:
         current_phase.set("synthesize")
         nonlocal completed_weight
         await _check_cancelled()
+        depth_profile: DepthProfile = s.get("depth_profile", get_depth_profile(2))
         report_count = len(s.get("subagent_reports", []))
         await trace("synthesize", "node_enter", f"Synthesizing {report_count} reports", {"report_count": report_count, "retry_count": s.get("synthesis_retry_count", 0)})
         await _emit({"type": "phase-update", "phase": "synthesize",
@@ -513,6 +549,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
             cancel_event=cancel_event,
             on_progress=_synth_progress,
             requirements=s.get("requirements"),
+            depth_profile=depth_profile,
         )
 
         # Retry if still truncated after continuation rounds
@@ -536,6 +573,7 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
                 cancel_event=cancel_event,
                 on_progress=_synth_progress,
                 requirements=s.get("requirements"),
+                depth_profile=depth_profile,
             )
 
         await _emit({"type": "report-draft", "content": s["report"][:1000],
@@ -546,13 +584,15 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         await _emit({"type": "progress", "phase": "synthesize", "percent": pct})
         completed_weight += PHASE_WEIGHTS["synthesize"]
 
-        await persist_checkpoint(s["run_id"], "synthesis", s)
+        if depth_profile.checkpoint_frequency == "all":
+            await persist_checkpoint(s["run_id"], "synthesis", s)
         return s
 
     async def _citation_node(s: ResearchState) -> ResearchState:
         current_phase.set("cite")
         nonlocal completed_weight
         await _check_cancelled()
+        depth_profile: DepthProfile = s.get("depth_profile", get_depth_profile(2))
         source_count = len(s.get("sources", []))
         await trace("cite", "node_enter", f"Adding citations from {source_count} sources", {"source_count": source_count})
         await _emit({"type": "phase-update", "phase": "cite",
@@ -578,7 +618,8 @@ async def build_and_run_graph(state: dict[str, Any], on_event, cancel_event=None
         await _emit({"type": "progress", "phase": "cite", "percent": pct})
         completed_weight += PHASE_WEIGHTS["cite"]
 
-        await persist_checkpoint(s["run_id"], "citation", s)
+        if depth_profile.checkpoint_frequency == "all":
+            await persist_checkpoint(s["run_id"], "citation", s)
         return s
 
     def _should_continue(s: ResearchState) -> str:
