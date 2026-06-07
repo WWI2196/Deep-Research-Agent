@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deep Research</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <!-- Title bar -->
+    <header class="titlebar">
+      <span class="titlebar-title">Deep Research</span>
+      <nav class="titlebar-nav" id="nav">
+        <button class="nav-btn active" data-page="input">Home</button>
+        <button class="nav-btn" data-page="dashboard" style="display:none" id="nav-dashboard">Progress</button>
+        <button class="nav-btn" data-page="report" style="display:none" id="nav-report">Report</button>
+        <button class="nav-btn" data-page="history">History</button>
+        <button class="nav-btn" data-page="library">Library</button>
+        <button class="nav-btn" data-page="settings">Settings</button>
+      </nav>
+    </header>
+
+    <!-- Page: Input -->
+    <main id="page-input" class="page active">
+      <div class="input-hero">
+        <h1 class="input-title">探索任何主题的深度研究</h1>
+        <div class="input-box">
+          <textarea id="query-input" placeholder="输入你想研究的问题..." rows="3"></textarea>
+        </div>
+        <div class="input-options">
+          <div class="option-group">
+            <label>深度</label>
+            <div class="btn-group" id="depth-group">
+              <button class="btn-option" data-depth="1" title="快速认知：5-10分钟，简化流程">1</button>
+              <button class="btn-option active" data-depth="2" title="均衡模式：20-25分钟，平衡速度与质量">2</button>
+              <button class="btn-option" data-depth="3" title="深度研究：30-40分钟，最高质量">3</button>
+            </div>
+            <span class="depth-hint" id="depth-hint">均衡模式</span>
+          </div>
+          <div class="option-group">
+            <label>模型</label>
+            <span id="model-display" style="font-size:13px;color:var(--text-secondary);line-height:32px">Loading...</span>
+          </div>
+          <div class="option-group">
+            <label>语言</label>
+            <div class="btn-group" id="language-group">
+              <button class="btn-option active" data-lang="zh">中文</button>
+              <button class="btn-option" data-lang="en">English</button>
+            </div>
+          </div>
+        </div>
+        <div class="input-collapsible" id="collection-toggle">
+          <button class="collapsible-header" id="btn-toggle-collections">
+            <span>Document Libraries</span>
+            <span class="chevron" id="collection-chevron">▸</span>
+          </button>
+          <div class="collapsible-body" id="collection-panel" style="display:none">
+            <div id="collection-checkboxes" class="collection-checkboxes">Loading...</div>
+            <div id="selected-collections" class="selected-collections"></div>
+          </div>
+        </div>
+        <button id="btn-start" class="btn-primary">开始研究</button>
+        <div id="input-error" class="error-msg" style="display:none"></div>
+      </div>
+      <div class="recent-section">
+        <h3 class="section-title">最近研究</h3>
+        <div id="recent-list" class="recent-list"></div>
+      </div>
+    </main>
+
+    <!-- Page: Dashboard -->
+    <main id="page-dashboard" class="page">
+      <div class="dashboard-layout">
+        <aside class="sidebar-left" id="sidebar-left">
+          <div class="sidebar-panel" id="sources-panel"></div>
+        </aside>
+        <section class="center">
+          <div class="progress-bar-container" id="progress-bar"></div>
+          <div class="phase-timeline" id="phase-timeline"></div>
+          <div class="subagent-board" id="subagent-board"></div>
+        </section>
+        <aside class="sidebar-right" id="sidebar-right">
+          <div class="sidebar-panel" id="agents-panel"></div>
+        </aside>
+      </div>
+    </main>
+
+    <!-- Page: Report -->
+    <main id="page-report" class="page">
+      <div class="report-layout">
+        <aside class="sidebar-left" id="report-sidebar">
+          <div class="report-stats" id="report-stats"></div>
+          <div class="report-actions">
+            <button id="btn-export-md" class="btn-secondary">Export Markdown</button>
+            <button id="btn-copy" class="btn-secondary">Copy to Clipboard</button>
+            <button id="btn-new-research" class="btn-primary">New Research</button>
+          </div>
+        </aside>
+        <section class="center">
+          <div class="report-content markdown-body" id="report-content"></div>
+        </section>
+      </div>
+    </main>
+
+    <!-- Page: History -->
+    <main id="page-history" class="page">
+      <div class="history-container">
+        <h2 class="section-title">Research History</h2>
+        <div id="history-list"></div>
+      </div>
+    </main>
+
+    <!-- Page: Library -->
+    <main id="page-library" class="page">
+      <div class="library-container">
+        <div class="library-layout">
+          <aside class="library-sidebar">
+            <div class="library-header">
+              <h2 class="section-title">Document Libraries</h2>
+              <button id="btn-new-collection" class="btn-primary" style="font-size:12px;padding:6px 12px">+ New</button>
+            </div>
+            <div id="collections-list" class="collections-list"></div>
+          </aside>
+          <section class="library-main">
+            <div class="library-toolbar">
+              <h3 id="library-title" class="section-title">Select a library</h3>
+              <div id="library-actions" class="library-actions" style="display:none">
+                <button id="btn-upload-doc" class="btn-secondary" style="font-size:12px">Upload</button>
+                <button id="btn-reindex-collection" class="btn-secondary" style="font-size:12px">Re-index</button>
+                <button id="btn-delete-collection" class="btn-danger" style="font-size:12px">Delete</button>
+              </div>
+            </div>
+            <div id="documents-list" class="documents-list"></div>
+            <input type="file" id="file-upload-input" style="display:none" accept=".pdf,.docx,.doc,.txt,.md,.html,.htm">
+          </section>
+        </div>
+      </div>
+    </main>
+
+    <!-- Page: Settings -->
+    <main id="page-settings" class="page">
+      <div class="settings-container">
+        <h2 class="section-title">Settings</h2>
+        <div class="settings-form" id="settings-form"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="js/utils/format.js"></script>
+  <script src="js/utils/markdown.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/components/input.js"></script>
+  <script src="js/components/library.js"></script>
+  <script src="js/components/sources.js"></script>
+  <script src="js/components/phases.js"></script>
+  <script src="js/components/subagents.js"></script>
+  <script src="js/components/dashboard.js"></script>
+  <script src="js/components/report.js"></script>
+  <script src="js/components/history.js"></script>
+  <script src="js/components/log-viewer.js"></script>
+  <script src="js/components/settings.js"></script>
+</body>
+</html>

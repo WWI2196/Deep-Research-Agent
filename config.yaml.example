@@ -1,0 +1,38 @@
+# Deep Research Agent 配置
+# 复制为 ~/.deep-research/config.yaml 并修改
+
+# ── LLM 配置（OpenAI 兼容接口）─────────────────────────────────────
+llm:
+  base_url: https://api.openai.com/v1
+  api_key: your-api-key-here
+  model: gpt-4o
+
+# ── 按角色分配模型（可选）───────────────────────────────────────────
+# 所有角色共用同一个 base_url 和 api_key，但可以指定不同模型
+roles:
+  planner: { model: gpt-4o }
+  subagent: { model: gpt-4o }
+  coordinator: { model: gpt-4o }
+  reflection: { model: gpt-4o }
+
+# ── 搜索 ──────────────────────────────────────────────────────────
+#   使用自托管 SearXNG (http://127.0.0.1:8080)
+#   通过 SEARXNG_BASE 环境变量可自定义地址
+#   无需 API Key
+
+# ── 研究默认参数 ────────────────────────────────────────────────────
+research:
+  quality_threshold: 0.7
+  max_sources_per_domain: 5
+  log_level: debug
+  # 上下文管理
+  keep_tool_results: 3              # 每 subagent 最少保留证据条数
+  max_evidence_tokens: 8000         # 单 subagent 证据总 token 预算
+  max_evidence_per_item: 3000       # 单条证据最大字符数
+  # 来源配额（防止文档来源挤占网络来源）
+  source_type_quotas:
+    document: 3
+    web: 8
+  min_source_per_type:
+    document: 1
+    web: 2
